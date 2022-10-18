@@ -1,0 +1,1204 @@
+#!/usr/bin/env bash
+#
+# image-builder
+#
+# Creates, modifies or writes GPT/EFI disk images
+# consisting of an ESP and a root filesystem
+#
+# Kernel and userland are either build locally or downloaded
+#
+# © 2022 Björn Busse (see also: LICENSE)
+# bj.rn@baerlin.eu
+#
+# TODO:
+#   Use install instead of cp where appropriate
+#   Consider use of cloud-init
+#
+#   Gentoo:
+#     Check stage3 checksum
+#     Check binpkgs checksum
+#     Only download if remote is newer than local
+#     Support A/B partitioning scheme like with Alpine
+#
+#    Make sure /etc/machine-id exists
+#    Check for and handle more errors
+#
+
+[[ "$TRACE" ]] && set -x
+set -eo pipefail
+
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_PATH="$(dirname -- "${BASH_SOURCE[0]}")"
+SCRIPT_PATH="$(cd -- "${SCRIPT_PATH}" && pwd)"
+
+arch="amd64"
+
+# Kernel
+kernel_version="6.1.0-rc5"
+kernel_repo_url="https://github.com/bbusse/linux/releases/download/latest"
+kernel="bzImage-${kernel_version}"
+kernel_url="${kernel_repo_url}/${kernel}"
+kernel_csum_file="${kernel}.sha384"
+kernel_csum_url="${kernel_repo_url}/${kernel_csum_file}"
+
+img_file="iss-screen-device.img"
+
+# Alpine
+alpine_version=latest
+alpine_compressed_img_file="${img_file}".xz
+alpine_repo_url="https://github.com/OpsBoost/iss-image-build/releases/download"
+alpine_img_url="${alpine_repo_url}/${alpine_version}/${alpine_compressed_img_file}"
+alpine_csum_file="${alpine_compressed_img_file}".sha384
+alpine_csum_url="${alpine_repo_url}/${alpine_version}/${alpine_csum_file}"
+
+# Gentoo
+gentoo_stage3_version="20221122T220204Z"
+gentoo_stage3_file="stage3-${arch}-systemd-${gentoo_stage3_version}.tar.xz"
+gentoo_stage3_repo_url="https://bouncer.gentoo.org/fetch/root/all/releases/amd64/autobuilds"
+gentoo_stage3_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_file}"
+gentoo_stage3_csum_file="${gentoo_stage3_file}.sha256"
+gentoo_stage3_csum_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_csum_file}"
+
+log_level=info
+
+
+check_root() {
+    if [ -z ${SUDO_USER+x} ]; then
+        if [ $UID != "0" ]; then
+            printf "\n"
+            error "$(printf "root privileges are needed\n")"
+            show_usage
+            exit 1
+        fi
+    fi
+}
+
+trim() {
+    local var
+    var="$*"
+    # Remove leading whitespace characters
+    var="${var#"${var%%[![:space:]]*}"}"
+    # Remove trailing whitespace characters
+    var="${var%"${var##*[![:space:]]}"}"
+    var="$(echo "${var}" | tr -d '\n')"
+    printf "%s" "${var}"
+}
+
+compare_checksums() {
+    local file
+    file="${1}"
+    local csum_1
+    local csum_2
+    csum_1=$(cat "${file}")
+    csum_1=${csum_1:0:64}
+    local os
+    os=$(uname)
+
+    case "$os" in
+    Linux)
+        csum_2=$(sha384sum "${2}")
+        csum_2=${csum_2:0:64}
+        ;;
+    Darwin)
+        ;&
+    FreeBSD)
+        csum_2=$(sha384 "${2}")
+        ;;
+    esac
+
+    info "$(printf "Comparing checksums\nA: %s\nB: %s\n" "${csum_1}" "${csum_2}")"
+
+    if [ -z ${csum_1+x} ]; then
+        echo 1
+    fi
+
+    if [ -z ${csum_2+x} ]; then
+        echo 1
+    fi
+
+    if [ "$csum_1" == "$csum_2" ]; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+mount_disk_image_part_by_no() {
+    local disk_file
+    disk_file="${1}"
+    local mnt_path
+    mnt_path="${2}"
+    local part_no
+    part_no="${3}"
+    local part_fs
+    part_fs="${4}"
+    local loop_no
+    loop_no="0"
+    local dev
+    dev="/dev/loop${loop_no}p${part_no}"
+
+    # Create loop mount device
+    loop_mount "${disk_file}"
+
+    mkdir -p "${mnt_path}"
+
+    part_fs="$(trim "${part_fs}")"
+
+    # Mount
+    if mount -t "${part_fs}" "${dev}" "${mnt_path}"; then
+        info "$(printf "Mounted %s at %s\n" "${disk_file}" "${mnt_path}")"
+    else
+        error "$(printf "Failed to mount %s (%s) at %s \
+                         Aborting..\n" "${dev}" \
+                                       "${part_fs}" \
+                                       "${mnt_path}")"
+        # Remove disk
+        loop_unmount
+        exit 1
+    fi
+
+    ls "${mnt_path}"
+
+    # Remove disk
+    loop_unmount
+}
+
+# Loop mount disk image partition
+mount_disk_image_by_part_offset() {
+    cmd="mount -o loop,offset=${2} ${1} ${3}"
+    if $cmd; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+# TODO: Use a list of files with source/target
+add_files() {
+    if [ -f "${1}" ]; then
+        cp "${1}" "${2}"
+    fi
+}
+
+# Download if checksum differs
+# from the one supplied by URL
+download_miss() {
+    local download_path
+    download_path="${1}"
+    local file
+    file="${2}"
+    local csum_url
+    csum_url="${3}"
+    local csum_file
+    csum_file="${4}"
+    local download_image
+    download_image=1
+
+    cd "${download_path}" || exit 1
+
+    debug "$(printf "Fetching file checksum\n")"
+    download "${csum_url}" "${download_path}"
+
+    if [ -f "${download_path}/${file}" ]; then
+        ret=$(compare_checksums "${download_path}/${csum_file}" \
+                                "${download_path}/${file}")
+
+        if [ "$ret" != "0" ]; then
+            info "$(printf "Remote and local images differ\n")"
+        else
+            info "$(printf "Skipping download: Image exists\n")"
+            download_image=0
+        fi
+    fi
+
+    if [ 1 == "$download_image" ]; then
+        download "${file}" "${download_path}"
+    fi
+}
+
+download() {
+    local url
+    url="${1}"
+    local path
+    path="${2}"
+
+    info "$(printf "Fetching: %s\n" "${url}")"
+    if ! curl -s -S --fail --output-dir "${path}" -LO "${url}"; then
+        error "$(printf "Failed to fetch file. Aborting..\n")"
+        exit 1
+    fi
+}
+
+ssh_add_pubkey() {
+    local user
+    user="${1}"
+    local key
+    key="${2}"
+
+    create_directory /home/"${user}"/.ssh/
+    printf "%s" "${key}" > "/home/${user}/.ssh/authorized_keys"
+    chmod 0700 /home/"${user}"/.ssh
+    chmod 0600 /home/"${user}"/.ssh/authorized_keys
+    chown -R "${user}":"${user}" /home/"${user}"
+}
+
+sway_configure_payload() {
+    local user
+    user="${1}"
+
+    # Overwrite existing file, then append
+    printf "exec %s\n" "pip install --user -r /home/${user}/requirements.txt" > "${mnt_path}"/etc/sway/config.d/exec-payload
+    printf "exec %s\n" "${PAYLOAD}" >> "${mnt_path}"/etc/sway/config.d/exec-payload
+}
+
+wifi_enable() {
+    # Remove symlink
+    rm "${mnt_path}/etc/network/interfaces"
+    printf "\nauto wlan0\niface wlan0 inet dhcp" > "${mnt_path}/etc/network/interfaces"
+
+    # We need to fix service ordering, wpa_supplicant starts
+    # before the device exists and exits otherwise
+    printf "\nrc_need=\"modules\"" >> "${mnt_path}/etc/conf.d/wpa_supplicant"
+    printf "\nrc_need=\"wpa_supplicant\"" >> "${mnt_path}/etc/conf.d/udhcpd"
+}
+
+# Write config for wpa_supplicant
+write_wpa_supplicant_config() {
+    local mnt_path
+    mnt_path="${1}"
+
+    if [ -f wpa_supplicant.conf  ]; then
+        info "$(printf "Found wifi config, copying..\n")"
+        cp wpa_supplicant.conf "${mnt_path}"/etc/wpa_supplicant/
+        return
+    elif [ -z ${2+x} ]; then
+        info "$(printf "Wifi credentials missing. ")"
+        info "$(printf "Not writing a wifi config\n")"
+        return
+    fi
+
+    local path
+    path="${mnt_path}/etc/wpa_supplicant"
+    mkdir -p "${path}"
+
+cat <<EOF > "${path}/wpa_supplicant.conf"
+ap_scan=1
+autoscan=periodic:10
+disable_scan_offload=1
+
+network={
+    ssid="${3}"
+    key_mgmt=${2}
+    psk="${4}"
+}
+EOF
+}
+
+info_n() {
+    info_with_notify "$@"
+}
+
+info_with_notify() {
+    info "$@"
+    if $SEND_NOTIFICATION; then
+        if ! notify-send "$1"; then
+            error "$(printf "Failed to send notification\n")"
+        fi
+    fi
+}
+
+info() {
+    if [ "info" == "${log_level}" ]; then
+        echo "$@" >&2
+        logger -p user.notice -t "$SCRIPT_NAME" "$@"
+    fi
+}
+
+debug() {
+    if [ 1 == "${DEBUG}" ]; then
+        echo "$@" >&2
+        logger -p user.error -t "$SCRIPT_NAME" "$@"
+    fi
+}
+
+error() {
+    echo -e "\033[0;31m${*}\033[0m" >&2
+    logger -p user.error -t "$SCRIPT_NAME" "$@"
+}
+
+create_boot_entry() {
+    local rootfs_dev
+    rootfs_dev="${1}"
+    local entry_file
+    entry_file="${2}"
+    local title
+    title="${3}"
+
+cat << EOF > "${entry_file}"
+title         ${title}
+linux         /bzImage
+options       root=${rootfs_dev} init=/lib/systemd/systemd enforcing=1
+EOF
+}
+
+create_disk() {
+    local file_disk
+    file_disk="${1}"
+
+    info "$(printf "Creating disk file %s..\n" "${file_disk}")"
+    dd if=/dev/zero of="$file_disk" bs=1M count=8192 status=progress
+
+    # Create partition layout
+    parted "${file_disk}" mklabel gpt
+    parted "${file_disk}" mkpart fat32 1 2
+    parted "${file_disk}" mkpart fat32 3 259
+    parted "${file_disk}" mkpart xfs 260 8GB
+    parted "${file_disk}" set 2 boot on
+    parted "${file_disk}" print
+}
+
+loop_exists() {
+    local loop_dev
+    loop_dev="$(losetup -f)"
+
+    if [ "/dev/loop0" == "${loop_dev}" ]; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+# Returns the last created loop device
+# or 1 if none exists
+loop_device() {
+    local loop_dev
+
+    loop_dev="$(losetup -f)"
+
+    if [ "/dev/loop0" == "${loop_dev}" ]; then
+        echo 1
+    else
+        read -r nloop_dev <<<"${loop_dev//[^0-9]/ }"
+        local n
+        n=$((nloop_dev-1))
+        echo "/dev/loop${n}"
+    fi
+}
+
+esp() {
+    echo "/dev/loop0p2"
+}
+
+rootfs() {
+    echo "/dev/loop0p3"
+}
+
+# Set up loop mount
+loop_mount() {
+    local disk_file
+    disk_file="${1}"
+
+    if [ 1 == "$(loop_exists)" ]; then
+        local loop_dev
+        loop_dev="$(loop_device)"
+        local mounts
+        mounts="$(loop_mounts)"
+
+        printf "\n"
+        printf "Warning: A loop device already exists!\n\n"
+
+        if [ "" != "${mounts}" ]; then
+            printf "Remove loop mounts to proceed:\n"
+            printf "%s\n\n" "${mounts}"
+        fi
+
+        printf "Remove existing loop devices to poceed:\n"
+        printf "%s\n\n" "${loop_dev}"
+        printf " # losetup -D\n\n"
+        printf "Aborting..\n"
+        exit 1
+    fi
+
+    modprobe loop
+    if ! losetup -P -f "${disk_file}"; then
+        error "$(printf "Failed to loop mount %s\n" "${disk_file}")"
+        exit 1
+    fi
+}
+
+# Tear down loop mount
+loop_unmount() {
+    losetup -D
+}
+
+# Returns active loop mounts
+loop_mounts() {
+    local mounts
+    mounts="$(mount | grep loop | awk '{print $1}')"
+    echo "${mounts}"
+}
+
+install_bootloader() {
+    local esp_dev
+    esp_dev="${1}"
+    local rootfs_dev
+    rootfs_dev="${2}"
+    local path
+    path="${3}"
+    local boot_entry_file
+    boot_entry_file="${4}"
+    local version
+    version="${5}"
+
+    if ! mount "${esp_dev}" "${path}"; then
+        printf "failed to install bootloader to efi sysem partition (esp)\n"
+        exit 1
+    fi
+
+    # populate esp partition
+    printf "\n"
+    printf "Creating esp content at path %s..\n" "${path}"
+    bootctl --esp-path="${path}" install
+
+    # create boot entry
+    local boot_entry_title
+    boot_entry_title="linux-${version}"
+    create_boot_entry "/dev/sda3" "${boot_entry_file}" "${boot_entry_title}"
+
+    printf "\n"
+    ls -al "${path}"
+    printf "\n"
+    printf "boot entry:\n"
+    cat "${boot_entry_file}"
+    printf "\n"
+
+    umount "${esp_dev}"
+}
+
+install_kernel() {
+    local kernel
+    kernel="${1}"
+    local dev
+    dev="${2}"
+    local mnt_path
+    mnt_path="${3}"
+    local part_fs
+    part_fs="vfat"
+
+    if mount -t "${part_fs}" "${dev}" "${mnt_path}"; then
+        cp "${kernel}" "${mnt_path}/bzimage"
+    else
+        error "$(printf "Failed to mount %s at %s\n" "${dev}" "${mnt_path}")"
+    fi
+
+    umount "${dev}"
+}
+
+sys_os() {
+    local uname
+    local os
+
+    uname=$(uname)
+
+    case "${uname}" in
+    Darwin)
+        os="macos"
+        ;;
+    FreeBSD)
+        os="freebsd"
+        ;;
+    Linux)
+        if ! grep '^ID=' /etc/os-release | awk -F'=' '{print $2}'\
+           > /dev/null; then
+            echo 1
+        else
+            os="$(grep '^ID=' /etc/os-release | awk -F'=' '{print $2}')"
+            os="${os%$'\n'}"
+        fi
+        ;;
+    esac
+
+    echo "${os}"
+}
+
+install_podman() {
+    local os
+    local cmd
+
+    os=$(sys_os)
+
+    case "$os" in
+    debian)
+        ;&
+    ubuntu)
+        sudo apt update -y
+        sudo apt install -y podman
+        ;;
+    fedora)
+        sudo dnf update -y
+        sudo dnf install -y podman
+        ;;
+    esac
+}
+
+freebsd_install_build_dependencies() {
+    # Install build dependencies
+    pkg install -y curl python
+}
+
+# We also use this in a github-action
+build_freebsd_kernel() {
+    local version
+    version="$(freebsd-version)"
+
+    make buildkernel
+}
+
+# We also use this in a github-action
+build_freebsd_world() {
+    local version
+    version="$(freebsd-version)"
+
+    make -j3 buildworld
+}
+
+# We also use this in a github-action
+build_freebsd_nano() {
+    local version
+    version="$(freebsd-version)"
+
+    make -j3 buildworld
+}
+
+linux_install_build_dependencies() {
+    local os
+
+    os=$(sys_os)
+
+    case "$os" in
+    debian)
+        # Install build dependencies
+        sudo apt update -y
+        sudo apt install -y libelf-dev \
+                            linux-firmware \
+                            intel-microcode
+        ;;
+    esac
+}
+
+# We also use this in a github-action
+build_linux_kernel() {
+    local kernel_version
+    kernel_version="${1}"
+
+
+    make -j3
+
+    mv arch/x86_64/boot/bzImage "arch/x86_64/boot/bzImage-${kernel_version}"
+    sha384sum "arch/x86_64/boot/bzImage-${kernel_version}" > "arch/x86_64/boot/bzImage-${kernel_version}.sha384"
+}
+
+# We also use this in a github-action
+build_alpine() {
+    sudo docker run --privileged --rm multiarch/qemu-user-static --persistent yes
+    docker run --rm \
+               --mount type=bind,source="${PWD}"/input/image.sh,target=/input/image.sh \
+               --mount type=bind,source="${PWD}"/input/modules,target=/input/modules \
+               -e ARCH=armhf \
+               -e DEFAULT_KERNEL_MODULES="*" \
+               -e SIZE_ROOT_FS=1024M \
+               -e SIZE_ROOT_PART=1024M \
+               -v "$PWD"/output:/output ghcr.io/raspi-alpine/builder
+
+    sudo mv output/sdcard.img.gz iss-screen-device.img.gz
+    sudo gunzip iss-screen-device.img.gz
+    sudo xz iss-screen-device.img
+    sudo sha384sum iss-screen-device.img.xz | sudo tee iss-screen-device.img.xz.sha384
+}
+
+# Build a Gentoo stage3 with catalyst
+# We also use this in a github-action
+build_gentoo_stage3() {
+    info "$(printf "Gentoo: stage3 build not implemented\n")"
+}
+
+# We also use this in a github-action
+build_gentoo_binpkgs() {
+    install_podman
+    podman build -t gentoo-binpkgs .
+}
+
+install_file() {
+    local src
+    src="${1}"
+    local target
+    target="${2}"
+    local mode
+    mode="${3}"
+
+    if install -m "${mode}" "${src}" "${target}"; then
+        info "$(printf "%s installed to %s\n" "${src}" "${target}")"
+    fi
+}
+
+install_builder() {
+    local src
+    src="${1}"
+    local target
+    target="${2}"
+    local mode
+    mode=755
+
+    install_file "${src}" "${target}" "${mode}"
+}
+
+# Populate rootfs
+install_rootfs() {
+    mount "${1}" "${2}"
+    printf "extracting stage3 to root in %s\n" "${2}"
+    tar xpf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner --directory "${2}"
+    printf "\n"
+    ls "${2}"
+    umount "${1}"
+}
+
+install_binpkgs() {
+    echo "0"
+}
+
+install_fonts() {
+    local path=
+    path="${1}"
+    local user
+    user="${2}"
+
+    mkdir -p "${path}"
+    download "https://wiki.c-base.org/dokuwiki/_media/ceva-c2.ttf" \
+              "${path}"
+}
+
+image_apply_changes() {
+    local disk_file
+    disk_file="${1}"
+    local mnt_path
+    mnt_path="${2}"
+    local user
+    user="${3}"
+    local part_no
+    part_no="${4}"
+    local part_fs
+    part_fs="${5}"
+
+    local disk_part_types
+    disk_part_types=$(part_types "${disk_file}")
+    info "$(printf "Found %s partition(s)\n" "${#disk_part_types[@]}")"
+
+    mount_disk_image_part_by_no "${disk_file}" \
+                                "${mnt_path}" \
+                                "${part_no}" \
+                                "${part_fs}"
+
+    info "$(printf "Applying changes to partition %s\n" "${part_no}")"
+
+    if [ -f "${SSH_PUBKEY}" ]; then
+        ssh_add_pubkey "${SSH_PUBKEY}"
+    fi
+
+    info "Writing wpa config"
+    write_wpa_supplicant_config "${mnt_path}" \
+                                "${WIFI_SECURITY}" \
+                                "${WIFI_ESSID}" \
+                                "${WIFI_PASSPHRASE}"
+
+    info "Enabling Wifi"
+    wifi_enable
+
+    info "Adding files"
+    add_files "video.mp4" "${mnt_path}"/home/"${user}"
+
+    info "Installing fonts"
+    install_fonts "${mnt_path}/home/${user}/.local/share/fonts"
+
+
+    info "Configuring Sway"
+    sway_configure_payload "${user}"
+
+    info "$(printf "Unmounting %s\n" "${mnt_path}")"
+    umount "${mnt_path}"
+}
+
+filesystem() {
+    local disk_file
+    disk_file="${1}"
+    local part_no
+    part_no="${2}"
+    local dev
+    local fs
+
+    loop_mount "${disk_file}"
+
+    local ret
+    ret="$(loop_device)"
+
+    if [ 1 == "${ret}" ]; then
+        dev="/dev/loop0p${part_no}"
+    else
+        dev="${ret}p${part_no}"
+    fi
+
+    if lsblk -f -n -ofstype "${dev}" ; then
+        # Some grace time is needed for the detection not to fail
+        sleep 1
+        fs="$(lsblk -f -n -ofstype "${dev}")"
+        if [ -v "${fs}" ]; then
+            error "$(printf "Failed to determine filesystem of %s\n" "${dev}")"
+            loop_unmount
+            exit 1
+        fi
+    else
+        error "$(printf "Failed to determine filesystem of %s\n" "${dev}")"
+        loop_unmount
+        exit 1
+    fi
+
+    loop_unmount
+
+    printf "%s" "${fs}"
+}
+
+part_types() {
+    local disk_file
+    disk_file="${1}"
+
+    local parts
+    IFS=$'\n' read -r -a parts <<< "$(fdisk -l "${disk_file}" | \
+                                      grep "${disk_file}" | \
+                                      grep -v Disk | \
+                                      awk '{ print $6 }')"
+    echo "${parts[@]}"
+}
+
+alpine_create_disk() {
+    local path
+    path="${1}"
+    local file
+    file="${2}"
+    local img_url
+    img_url="${3}"
+    local csum_url
+    csum_url="${4}"
+    local csum_file
+    csum_file="${5}"
+    local user
+    user="${6}"
+    local compressed_file
+    compressed_file="${file}.xz"
+
+    cd "${path}" || exit 1
+    info "Alpine: Fetching pre-built image"
+    download_miss "${path}" \
+                  "${img_url}" \
+                  "${csum_url}" \
+                  "${csum_file}"
+
+    if [ -f "${file}" ]; then
+        info "Uncompressed disk image exists: Not overwriting existing one"
+    else
+        if [ ! -e "${compressed_file}" ];  then
+            error "$(printf "Failed to decompress: File does not exist. Aborting..\n")"
+            exit 1
+        else
+            if ! xz -d -k -f "${compressed_file}"; then
+                error "$("Failed to decompress file. Aborting..\n")"
+                exit 1
+            fi
+        fi
+    fi
+
+    info "$(printf "Alpine: Modifying image\n")"
+
+    # We need to apply changes to both partitions: A/B
+    local part_fs
+    part_fs="$(filesystem "${path}/${file}" 2)"
+    debug "$(printf "Detected filesystem: %s\n" "${part_fs}")"
+
+    image_apply_changes "${path}/${file}" \
+                        "${mnt_path}" \
+                        "${user}" \
+                        2 \
+                        "${part_fs}"
+
+    image_apply_changes "${path}/${file}" \
+                        "${mnt_path}" \
+                        "${user}" \
+                        3 \
+                        "${part_fs}"
+}
+
+gentoo_create_disk() {
+    local path
+    path="${1}"
+    local disk_file
+    disk_file="${1}/${2}"
+    local mnt_path
+    mnt_path="${3}"
+    local rootfs_dev
+    rootfs_dev=$(rootfs)
+    local esp_dev
+    esp_dev=$(esp)
+    local boot_entry_file
+    boot_entry_file="${mnt_path}/loader/entries/linux-${kernel_version}.conf"
+
+    info "Fetching kernel"
+    download_miss "${path}" \
+                  "${kernel_url}" \
+                  "${kernel_csum_url}" \
+                  "${kernel_csum_file}"
+
+
+    info "Fetching stage3"
+    download_miss "${path}" \
+                  "${gentoo_stage3_url}" \
+                  "${gentoo_stage3_csum_url}" \
+                  "${gentoo_stage3_csum_file}"
+
+    info "$(printf "Creating disk %s\n" "${img_file}")"
+    create_disk "${disk_file}"
+    loop_mount "${disk_file}"
+
+    # Create filesystems
+    if ! mkfs.vfat "${esp_dev}"; then
+        error "$(printf "Error: Failed to create filesystem\n")"
+        exit 1
+    fi
+    if ! mkfs.xfs "${rootfs_dev}"; then
+        error "$(printf "Error: Failed to create filesystem\n")"
+        exit 1
+    fi
+
+    # Install EFI bootloader
+    install_bootloader "${esp_dev}" \
+                       "${rootfs_dev}" \
+                       "${mnt_path}" \
+                       "${boot_entry_file}" \
+                       "${kernel_version}"
+
+    # Install files
+    install_kernel "${kernel}" "${esp_dev}" "${mnt_path}" "${kernel_version}"
+    install_rootfs "${rootfs_dev}" "${mnt_path}"
+    install_binpkgs
+
+    # Remove disk
+    loop_unmount
+}
+
+write_image_to_disk() {
+    local file
+    file="${1}"
+    local dev
+    dev="${2}"
+    local notify
+    notify="${3}"
+
+    local file_size
+    file_size=$(du -h -b "${file}" | cut -f1)
+    info "$(printf "Writing %s to %s (%sM)\n" "${file}" "${dev}" "${file_size}")"
+    if dd if="${file}" of="${dev}" bs=2M status=progress; then
+        info "image-builder: Image successfully written\n"
+        if $notify; then
+            if ! notify-send "image-builder: Image successfully written"; then
+                error "Failed to send notification"
+            fi
+        fi
+        exit 0
+    else
+        error "Failed writing image\nIs a card or device inserted?\n"
+        if $notify; then
+            if ! notify-send "image-builder: Failed writing image"; then
+                error "Failed to send notification"
+            fi
+        fi
+    fi
+
+    exit 1
+}
+
+ovmf_path() {
+    local path
+    local os
+
+    os=$(sys_os)
+
+    case "$os" in
+    fedora)
+        path="/usr/share/edk2/ovmf"
+        ;;
+    freebsd)
+        path="/usr/local/share/uefi-firmware"
+        ;;
+    esac
+
+    echo "${path}"
+}
+
+run_virt_linux() {
+    local disk_file
+    disk_file="${1}"
+    local cmd
+    qemu_bin="qemu-system-x86_64"
+    local fw_path
+    fw_path="$(ovmf_path)"
+    local fw_file
+    fw_file="OVMF_CODE.fd"
+    local fw_file_vars
+    fw_file_vars="OVMF_VARS.fd"
+    local fw
+    fw="${fw_path}/${fw_file}"
+    local fw_vars
+    fw_vars="${fw_path}/${fw_file_vars}"
+
+    # We need a local writeable copy of EFI vars
+    if ! cp "${fw_vars}" .; then
+        error "$(printf "Failed to copy EFI vars\n")"
+        error "$(printf "Failed to run virtual machine\n")"
+        exit 1
+    fi
+
+    local cmd
+    cmd="${qemu_bin} -m 2048 \
+                     -machine type=q35,accel=kvm \
+                     -drive if=pflash,format=raw,unit=0,file=${fw},readonly=on \
+                     -drive if=pflash,format=raw,unit=1,file=${fw_file_vars} \
+                     -drive format=raw,file=${disk_file}"
+
+    info "$(printf "Running:\n%s\n" "$(echo -n "${cmd}" | fmt -u)")"
+    if ! ${cmd}; then
+        printf "Failed to start virtual machine\n"
+        exit 1
+    fi
+}
+
+run_virt_freebsd() {
+    local disk_file
+    disk_file="${1}"
+    local fw_path
+    fw_path="$(ovmf_path)"
+    local fw_file
+    fw_file="BHYVE_UEFI_CODE.fd"
+    local fw_file_vars
+    fw_file_vars="BHYVE_UEFI_VARS.fd"
+    local fw
+    fw="${fw_path}/${fw_file}"
+    local fw_vars
+    fw_vars="${fw_path}/${fw_file_vars}"
+    local cmd
+    cmd="bhyve -m 2g \
+               -l bootrom,${fw_path}/${fw_file},\
+                          ${fw_vars} \
+               ${disk_file}"
+
+    info "$(printf "Running %s\n" "${cmd}")"
+}
+
+show_usage() {
+    printf "\n"
+    printf "  Usage:\n"
+    printf "\n"
+    printf "    image-builder build   TARGET: alpine|gentoo|freebsd\n"
+    printf "    image-builder create  TARGET: alpine|gentoo|freebsd\n"
+    printf "    image-builder install\n"
+    printf "    image-builder mount   [PARTITION: esp|rootfs]\n"
+    printf "    image-builder write   DEVICE\n"
+    printf "\n"
+}
+
+main() {
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/${UID}/bus}"
+    local service_user
+    service_user=iss
+    local mnt_path
+    mnt_path=/mnt/tmp
+
+    local img_path
+    if [ -v "${OLDPWD}" ]; then
+        img_path="${OLDPWD}"
+    else
+        img_path="${PWD}"
+    fi
+
+    local img
+    img="${img_path}/${img_file}"
+
+    # Source vars
+    if [ -f ENVIRONMENT ]; then
+        source ENVIRONMENT
+    fi
+
+    if [ -v "${DEBUG}" ]; then
+        DEBUG=0
+    fi
+
+    if [ -v "${SEND_NOTIFICATION}" ]; then
+        SEND_NOTIFICATION=0
+    fi
+
+    # Show help
+    if [ "help" == "${1}" ]; then
+        show_usage
+        exit 0
+    fi
+
+    # Build
+    if [ "build" == "${1}" ]; then
+        local target_os
+        target_os="${2}"
+
+        case "$target_os" in
+        alpine)
+            build_alpine
+            exit 0
+            ;;
+        freebsd)
+            freebsd_install_build_dependencies
+            build_freebsd_kernel
+            build_freebsd_nano
+            exit 0
+            ;;
+        gentoo)
+            build_gentoo_stage3
+            build_gentoo_binpkgs
+            exit 0
+            ;;
+        linux-kernel)
+            linux_install_build_dependencies
+            build_linux_kernel "${kernel_version}"
+            exit 0
+            ;;
+        esac
+    fi
+
+    # Create disk image
+    if [ "create" == "${1}" ]; then
+        # We need root privileges
+        check_root
+
+        local target_os
+        target_os="${2}"
+
+        case "$target_os" in
+        alpine)
+            alpine_create_disk "${img_path}" \
+                               "${img_file}" \
+                               "${alpine_img_url}" \
+                               "${alpine_csum_url}" \
+                               "${alpine_csum_file}" \
+                               "${service_user}"
+            exit 0
+            ;;
+        gentoo)
+            gentoo_create_disk  "${img_path}" "${img_file}" "${mnt_path}"
+            exit 0
+            ;;
+        freebsd)
+            freebsd_create_disk "${img_path}"
+            exit 0
+            ;;
+        *)
+            printf "\n"
+            printf "You need to specify a valid target system OS\n"
+            printf "  One of: alpine, gentoo, freebsd\n"
+            show_usage
+            exit 1
+        esac
+    fi
+
+    # Install image-builder
+    if [ "install" == "${1}" ]; then
+        install_builder "${SCRIPT_PATH}/${SCRIPT_NAME}" \
+                        "/usr/local/bin"
+        exit 0
+    fi
+
+    # Mount disk image
+    if [ "mount" == "${1}" ]; then
+        local part_no
+        part_no="${2}"
+
+        if [ "" == "${part_no}" ]; then
+            error "You need to specify the partition number to mount"
+            exit 1
+        fi
+
+        # We need root privileges
+        check_root
+
+        if [ ! -e "${img}" ]; then
+            error "$(printf "Can not find disk image: %s" "${img}")"
+            exit 1
+        fi
+
+        local part_fs
+        part_fs="$(filesystem "${img}" "${part_no}")"
+        part_fs="$(echo -n "$part_fs")"
+
+        mount_disk_image_part_by_no "${img}" \
+                                    "${mnt_path}" \
+                                    "${part_no}" \
+                                    "${part_fs}"
+
+        exit 0
+    fi
+
+    if [ "write" == "${1}" ]; then
+        # We need root privileges
+        check_root
+
+        local device
+        device="${2}"
+        if [ "" == "${device}" ]; then
+            printf "Missing block device\n"
+            printf "The 'write' command needs a device to write to\n"
+            exit 1
+        fi
+
+        if [ ! -b "${device}" ]; then
+            printf "Unsupported device: %s\n" "${device}"
+            printf "Is a card or device inserted?\n"
+            printf "Not writing\n"
+            exit 1
+        fi
+
+        # Write disk image to device
+        write_image_to_disk "${img_path}/${img_file}" "${device}"
+
+        info "$(printf "image-builder: Done writing image\n")"
+        if $SEND_NOTIFICATION; then
+            if ! notify-send "image-builder: Done writing image"; then
+                error "$(printf "Failed to send notification\n")"
+            fi
+        fi
+    fi
+
+    # Run disk image
+    if [ "run" == "${1}" ]; then
+        if [ -e "${img}" ]; then
+            run_virt_linux "${img}"
+            exit 0
+        else
+            error "$(printf "Can not find disk image: %s" "${img}")"
+            exit 1
+        fi
+    fi
+
+    if [ -v "${1}" ]; then
+        error "$(printf "Please provide a valid verb\n")"
+        show_usage
+        exit 1
+    fi
+
+    error "$(printf "%s is not a valid verb\n" "${1}")"
+    show_usage
+    exit 1
+}
+
+main "$@"
