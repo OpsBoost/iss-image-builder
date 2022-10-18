@@ -1,0 +1,42 @@
+---
+name: Build Alpine Image
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Build image
+        run: |
+          sudo docker run --privileged --rm multiarch/qemu-user-static --persistent yes
+          docker run --rm \
+          --mount type=bind,source=${PWD}/input/image.sh,target=/input/image.sh \
+          --mount type=bind,source=${PWD}/input/modules,target=/input/modules \
+          -e ARCH=armhf \
+          -e DEFAULT_KERNEL_MODULES="*" \
+          -e SIZE_ROOT_FS=1024M \
+          -e SIZE_ROOT_PART=1024M \
+          -v $PWD/output:/output ghcr.io/raspi-alpine/builder
+          sudo mv output/sdcard.img.gz iss-screen-device.img.gz
+          sudo sha384sum iss-screen-device.img.gz > iss-screen-device.img.gz.sha384
+      - name: Release image
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: false
+          automatic_release_tag: "latest"
+          files: |
+            iss-screen-device.img.gz
+            iss-screen-device.img.gz.sha384
