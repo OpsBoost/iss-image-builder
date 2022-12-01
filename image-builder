@@ -465,12 +465,12 @@ install_bootloader() {
 }
 
 install_kernel() {
+    local kernel
+    kernel="${1}"
     local dev
-    dev="${1}"
+    dev="${2}"
     local mnt_path
-    mnt_path="${2}"
-    local suffix
-    suffix="${3}"
+    mnt_path="${3}"
     local part_fs
     part_fs="vfat"
 
@@ -611,7 +611,7 @@ filesystem() {
         sleep 1
         fs="$(lsblk -f -n -ofstype "${dev}")"
         #fs="$(trim "${fs}")"
-        if [ -v ${fs} ]; then
+        if [ -v "${fs}" ]; then
             error "$(printf "Failed to determine filesystem of %s\n" "${dev}")"
             loop_unmount
             exit 1
@@ -741,7 +741,7 @@ gentoo_create_disk() {
                        "${kernel_version}"
 
     # Install files
-    install_kernel "${esp_dev}" "${mnt_path}" "${kernel_version}"
+    install_kernel "${kernel}" "${esp_dev}" "${mnt_path}" "${kernel_version}"
     install_rootfs "${rootfs_dev}" "${mnt_path}"
     install_binpkgs
 
@@ -888,7 +888,7 @@ main() {
         DEBUG=0
     fi
 
-    if [ -v "${SEND_NOTFICATION}" ]; then
+    if [ -v "${SEND_NOTIFICATION}" ]; then
         SEND_NOTIFICATION=0
     fi
 
@@ -912,7 +912,7 @@ main() {
         part_no=2
         local part_fs
         part_fs="$(filesystem "${img}" "${part_no}")"
-        part_fs=$(echo -n $part_fs)
+        part_fs="$(echo -n "$part_fs")"
 
         mount_disk_image_part_by_no "${img}" \
                                     "${mnt_path}" \
