@@ -1046,9 +1046,10 @@ show_usage() {
     printf "  Usage:\n"
     printf "\n"
     printf "    image-builder build   TARGET: alpine|gentoo|freebsd\n"
+    printf "    image-builder chroot  PARTITION_NUMBER\n"
     printf "    image-builder create  TARGET: alpine|gentoo|freebsd\n"
     printf "    image-builder install\n"
-    printf "    image-builder mount   [PARTITION: esp|rootfs]\n"
+    printf "    image-builder mount   PARTITION_NUMBER\n"
     printf "    image-builder write   DEVICE\n"
     printf "\n"
 }
@@ -1161,7 +1162,7 @@ main() {
     fi
 
     # Mount disk image
-    if [ "mount" == "${1}" ]; then
+    if [ "mount" == "${1}" ] || [ "chroot" == "${1}" ]; then
         local part_no
         part_no="${2}"
 
@@ -1186,6 +1187,10 @@ main() {
                                     "${mnt_path}" \
                                     "${part_no}" \
                                     "${part_fs}"
+
+        if [ "chroot" == "${1}" ]; then
+            chroot "${mnt_path}" "/bin/sh"
+        fi
 
         exit 0
     fi
