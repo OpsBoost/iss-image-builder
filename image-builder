@@ -941,6 +941,39 @@ ovmf_path() {
     echo "${path}"
 }
 
+# Returns 0 if the device exists
+# 1 otherwise
+net_dev_exists() {
+    local dev_name
+    dev_name="${1}"
+
+    local r
+    r="$(ip l | grep "${dev_name}")"
+    r="$(trim "$r")"
+
+    if [ "" == "${r}" ]; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+# Create a virtual network device
+net_create_dev() {
+    local suffix
+    suffix="${1}"
+    local dev_name
+    dev_name="tap-${suffix}"
+
+    local r
+    r="$(net_dev_exists "${dev_name}")"
+
+    if [ 1 != "$r" ] ; then
+        info "$(printf "Creating network device %s\n" "${dev_name}")"
+        ip tuntap add mode tap "${dev_name}"
+    fi
+}
+
 run_virt_linux() {
     local disk_file
     disk_file="${1}"
@@ -956,6 +989,8 @@ run_virt_linux() {
     fw="${fw_path}/${fw_file}"
     local fw_vars
     fw_vars="${fw_path}/${fw_file_vars}"
+    local net_dev_suffix
+    net_dev_suffix="vm"
 
     # We need a local writeable copy of EFI vars
     if ! cp "${fw_vars}" .; then
@@ -964,12 +999,18 @@ run_virt_linux() {
         exit 1
     fi
 
+    net_create_dev "${net_dev_suffix}"
+
     local cmd
-    cmd="${qemu_bin} -m 2048 \
-                     -machine type=q35,accel=kvm \
-                     -drive if=pflash,format=raw,unit=0,file=${fw},readonly=on \
-                     -drive if=pflash,format=raw,unit=1,file=${fw_file_vars} \
-                     -drive format=raw,file=${disk_file}"
+    cmd="runuser -u ${SUDO_USER} -- \
+                    ${qemu_bin} -m 2048 \
+                    -machine type=q35,accel=kvm \
+                    -nic tap,ifname=tap-${net_dev_suffix},script=no,downscript=no,vhost=on,model=virtio-net-pci \
+                    -device virtio-vga-gl \
+                    -display gtk,gl=on \
+                    -drive if=pflash,format=raw,unit=0,file=${fw},readonly=on \
+                    -drive if=pflash,format=raw,unit=1,file=${fw_file_vars} \
+                    -drive format=raw,file=${disk_file}"
 
     info "$(printf "Running:\n%s\n" "$(echo -n "${cmd}" | fmt -u)")"
     if ! ${cmd}; then
