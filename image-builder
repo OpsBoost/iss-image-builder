@@ -12,15 +12,20 @@
 #
 # TODO:
 #   Use install instead of cp where appropriate
-#   Consider use of cloud-init
+#   Consider support for cloud-init
+#
+#   Alpine:
+#     Use GPT as with Gentoo/FreeBSD
+#
+#   FreeBSD:
+#     Build NanoBSD edition
 #
 #   Gentoo:
 #     Check stage3 checksum
 #     Check binpkgs checksum
-#     Only download if remote is newer than local
-#     Support A/B partitioning scheme like with Alpine
+#     Support A/B partitioning scheme as with Alpine
 #
-#    Make sure /etc/machine-id exists
+#    Make sure /etc/machine-id and /etc/os-release exist
 #    Check for and handle more errors
 #
 
@@ -157,8 +162,6 @@ mount_disk_image_part_by_no() {
         exit 1
     fi
 
-    ls "${mnt_path}"
-
     # Remove disk
     loop_unmount
 }
@@ -229,37 +232,124 @@ download() {
     fi
 }
 
+create_user() {
+    local user
+    user="${1}"
+    local path
+    path="${2}"
+    local os
+    os=sys_os
+
+    case "$os" in
+    freebsd)
+        cmd="pw user add ${user}"
+        ;;
+    debian)
+        ;&
+    ubuntu)
+        ;&
+    fedora)
+        cmd="adduser -U ${user} ${user}"
+        ;;
+    esac
+
+    chroot "${mnt_path}" /bin/sh -c "${cmd}"
+}
+
+# Resolve a username to id in a chroot
+chroot_user_id() {
+    local path
+    path="${1}"
+    local user
+    user="${2}"
+    local cmd
+    cmd="id -u ${user}"
+
+    local uid
+    uid="$(chroot "${path}" /bin/sh -c "${cmd}")"
+    echo "${uid}"
+}
+
+# Add an ssh pubkey
+# Use a different root if path and uid are provided
 ssh_add_pubkey() {
     local user
     user="${1}"
     local key
     key="${2}"
+    local path
+    path="${3}/home/${user}"
+    local uid="${4}"
 
-    create_directory /home/"${user}"/.ssh/
-    printf "%s" "${key}" > "/home/${user}/.ssh/authorized_keys"
-    chmod 0700 /home/"${user}"/.ssh
-    chmod 0600 /home/"${user}"/.ssh/authorized_keys
-    chown -R "${user}":"${user}" /home/"${user}"
+    mkdir -p "${path}"/.ssh/
+    printf "%s" "${key}" > "${path}/.ssh/authorized_keys"
+    chmod 0700 "${path}"/.ssh
+    chmod 0600 "${path}"/.ssh/authorized_keys
+
+    # Use uid when working on a different root (chroot)
+    # because user mapping to uid can not work
+    if [ -z "${uid}" ]; then
+        chown -R "${uid}":"${uid}" "${path}"
+    else
+        chown -R "${user}":"${user}" "${path}"
+    fi
 }
 
 sway_configure_payload() {
     local user
     user="${1}"
 
+    mkdir -p "${mnt_path}/etc/sway/config.d"
+
     # Overwrite existing file, then append
-    printf "exec %s\n" "pip install --user -r /home/${user}/requirements.txt" > "${mnt_path}"/etc/sway/config.d/exec-payload
+    printf "exec %s\n" "pip install --user -r /home/${user}/requirements.txt" > "${mnt_path}/etc/sway/config.d/exec-payload"
     printf "exec %s\n" "${PAYLOAD}" >> "${mnt_path}"/etc/sway/config.d/exec-payload
 }
 
 wifi_enable() {
-    # Remove symlink
-    rm "${mnt_path}/etc/network/interfaces"
-    printf "\nauto wlan0\niface wlan0 inet dhcp" > "${mnt_path}/etc/network/interfaces"
+    # Remove symlink (Alpine)
+    if [ -f "${mnt_path}/etc/network/interfaces" ]; then
+        rm "${mnt_path}/etc/network/interfaces"
+        printf "\nauto wlan0\niface wlan0 inet dhcp" > "${mnt_path}/etc/network/interfaces"
 
-    # We need to fix service ordering, wpa_supplicant starts
-    # before the device exists and exits otherwise
-    printf "\nrc_need=\"modules\"" >> "${mnt_path}/etc/conf.d/wpa_supplicant"
-    printf "\nrc_need=\"wpa_supplicant\"" >> "${mnt_path}/etc/conf.d/udhcpd"
+        # We need to fix service ordering, wpa_supplicant starts
+        # before the device exists and exits otherwise (Alpine with OpenRC)
+        printf "\nrc_need=\"modules\"" >> "${mnt_path}/etc/conf.d/wpa_supplicant"
+        printf "\nrc_need=\"wpa_supplicant\"" >> "${mnt_path}/etc/conf.d/udhcpd"
+    fi
+}
+
+# Write systemd-unit for static network config
+# for initial provisioning
+# Needs iproute2
+write_net_config() {
+    local mnt_path
+    mnt_path="${1}"
+    local net_device
+    net_device="${2}"
+    local net_address
+    net_address="${3}"
+    local net_gateway
+    net_gateway="${4}"
+    local path
+    path="${mnt_path}/etc/systemd/system"
+
+cat <<EOF > "${path}/net-config.service"
+[Unit]
+Description=Static Network Configuration
+
+[Install]
+WantedBy=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/ip link set dev ${net_device} up
+ExecStart=/bin/ip addr add ${net_address} dev ${net_device}
+ExecStart=/bin/ip route add default via ${net_gateway}
+EOF
+
+    # Enable service
+    ln -s -f "${path}/net-config.service" "${path}/getty.target.wants/net-config.service"
 }
 
 # Write config for wpa_supplicant
@@ -451,16 +541,16 @@ install_bootloader() {
     version="${5}"
 
     if ! mount "${esp_dev}" "${path}"; then
-        printf "failed to install bootloader to efi sysem partition (esp)\n"
+        error "$(printf "Failed to install bootloader to efi sysem partition (esp)\n")"
         exit 1
     fi
 
-    # populate esp partition
+    # Populate esp partition
     printf "\n"
     printf "Creating esp content at path %s..\n" "${path}"
     bootctl --esp-path="${path}" install
 
-    # create boot entry
+    # Create boot entry
     local boot_entry_title
     boot_entry_title="linux-${version}"
     create_boot_entry "/dev/sda3" "${boot_entry_file}" "${boot_entry_title}"
@@ -468,7 +558,7 @@ install_bootloader() {
     printf "\n"
     ls -al "${path}"
     printf "\n"
-    printf "boot entry:\n"
+    info "$(printf "Boot entry:\n")"
     cat "${boot_entry_file}"
     printf "\n"
 
@@ -578,10 +668,15 @@ linux_install_build_dependencies() {
     case "$os" in
     debian)
         # Install build dependencies
-        sudo apt update -y
-        sudo apt install -y libelf-dev \
-                            linux-firmware \
-                            intel-microcode
+        apt update -y
+        apt install -y libelf-dev \
+                       linux-firmware \
+                       intel-microcode
+        ;;
+    fedora)
+        dnf install -y intel-gpu-firmware \
+                       iwl6000-firmware \
+                       linux-firmware
         ;;
     esac
 }
@@ -677,7 +772,7 @@ install_fonts() {
               "${path}"
 }
 
-image_apply_changes() {
+provision() {
     local disk_file
     disk_file="${1}"
     local mnt_path
@@ -686,22 +781,50 @@ image_apply_changes() {
     user="${3}"
     local part_no
     part_no="${4}"
-    local part_fs
-    part_fs="${5}"
+    local net_device
+    net_device="${5}"
+    local net_address
+    net_address="${6}"
+    local net_gateway
+    net_gateway="${7}"
+    local ansible_user
+    ansible_user="${8}"
+    local ansible_roles
+    ansible_roles="${9}"
 
     local disk_part_types
     disk_part_types=$(part_types "${disk_file}")
     info "$(printf "Found %s partition(s)\n" "${#disk_part_types[@]}")"
+
+    local part_fs
+    part_fs="$(filesystem "${disk_file}" "${part_no}")"
+    debug "$(printf "Detected filesystem: %s\n" "${part_fs}")"
 
     mount_disk_image_part_by_no "${disk_file}" \
                                 "${mnt_path}" \
                                 "${part_no}" \
                                 "${part_fs}"
 
-    info "$(printf "Applying changes to partition %s\n" "${part_no}")"
+    debug "$(printf "Applying changes to partition %s\n" "${part_no}")"
 
-    if [ -f "${SSH_PUBKEY}" ]; then
-        ssh_add_pubkey "${SSH_PUBKEY}"
+    if [ -n "${ansible_user}" ]; then
+        info "Creating user"
+        create_user "${ansible_user}" "${mnt_path}"
+    fi
+
+    if [ -n "${SSH_PUBKEY}" ]; then
+        info "Adding SSH public key"
+        local uid
+        uid="$(chroot_user_id ${mnt_path} ${ansible_user})"
+        ssh_add_pubkey "${SSH_USER}" "${SSH_PUBKEY}" "${mnt_path}" "${uid}"
+    fi
+
+    info "Writing network config"
+    write_net_config "${mnt_path}" "${net_device}" "${net_address}" "${net_gateway}"
+
+    if [ -z "${ansible_roles}" ]; then
+        info "Running Ansible for image provisioning"
+        #run_ansible_roles "${ansible_roles}"
     fi
 
     info "Writing wpa config"
@@ -814,25 +937,6 @@ alpine_create_disk() {
             fi
         fi
     fi
-
-    info "$(printf "Alpine: Modifying image\n")"
-
-    # We need to apply changes to both partitions: A/B
-    local part_fs
-    part_fs="$(filesystem "${path}/${file}" 2)"
-    debug "$(printf "Detected filesystem: %s\n" "${part_fs}")"
-
-    image_apply_changes "${path}/${file}" \
-                        "${mnt_path}" \
-                        "${user}" \
-                        2 \
-                        "${part_fs}"
-
-    image_apply_changes "${path}/${file}" \
-                        "${mnt_path}" \
-                        "${user}" \
-                        3 \
-                        "${part_fs}"
 }
 
 gentoo_create_disk() {
@@ -974,6 +1078,13 @@ net_create_dev() {
     fi
 }
 
+run_ansible_roles() {
+    local roles
+    roles="${1}"
+    info "$(printf "Ansible: Applying roles %s\n" "${roles}")"
+    exit 1
+}
+
 run_virt_linux() {
     local disk_file
     disk_file="${1}"
@@ -999,6 +1110,8 @@ run_virt_linux() {
         exit 1
     fi
 
+    chown "${SUDO_USER}" "${fw_file_vars}"
+
     net_create_dev "${net_dev_suffix}"
 
     local cmd
@@ -1017,6 +1130,11 @@ run_virt_linux() {
         printf "Failed to start virtual machine\n"
         exit 1
     fi
+}
+
+ansible_compose_roles() {
+    local roles
+    roles="${1}"
 }
 
 run_virt_freebsd() {
@@ -1043,14 +1161,22 @@ run_virt_freebsd() {
 
 show_usage() {
     printf "\n"
+    printf " image-builder\n"
+    printf "\n"
     printf "  Usage:\n"
     printf "\n"
-    printf "    image-builder build   TARGET: alpine|gentoo|freebsd\n"
-    printf "    image-builder chroot  PARTITION_NUMBER\n"
-    printf "    image-builder create  TARGET: alpine|gentoo|freebsd\n"
+    printf "    image-builder build      TARGET\n"
+    printf "    image-builder chroot     PARTITION_NUMBER\n"
+    printf "    image-builder create     TARGET\n"
     printf "    image-builder install\n"
-    printf "    image-builder mount   PARTITION_NUMBER\n"
-    printf "    image-builder write   DEVICE\n"
+    printf "    image-builder mount      PARTITION_NUMBER\n"
+    printf "    image-builder provision  PARTITION_NUMBER\n"
+    printf "    image-builder write      DEVICE\n"
+    printf "\n"
+    printf "\n"
+    printf "  TARGET            One of alpine|gentoo|freebsd\n"
+    printf "  DEVICE            A raw block device e.g. /dev/sdX, /dev/mmcblk0\n"
+    printf "  PARTITION_NUMBER  A partition number to work on\n"
     printf "\n"
 }
 
@@ -1082,6 +1208,41 @@ main() {
 
     if [ -v "${SEND_NOTIFICATION}" ]; then
         SEND_NOTIFICATION=0
+    fi
+
+    local net_dev
+    if [ -v "${NET_DEV}" ]; then
+        net_dev="enp0s1"
+    else
+        net_dev="${NET_DEV}"
+    fi
+
+    local net_address
+    if [ -v "${NET_ADDRESS}" ]; then
+        net_address=""
+    else
+        net_address="${NET_ADDRESS}"
+    fi
+
+    local net_gateway
+    if [ -v "${NET_GATEWAY}" ]; then
+        net_gateway=""
+    else
+        net_gateway="${NET_GATEWAY}"
+    fi
+
+    local ansible_user
+    if [ -v "${ANSIBLE_USER}" ]; then
+        ansible_user="ansible"
+    else
+        ansible_user="${ANSIBLE_USER}"
+    fi
+
+    local ansible_roles
+    if [ -v "${ANSIBLE_ROLES}" ]; then
+        ansible_roles="ansible"
+    else
+        ansible_roles="${ANSIBLE_ROLES}"
     fi
 
     # Show help
@@ -1135,10 +1296,49 @@ main() {
                                "${alpine_csum_url}" \
                                "${alpine_csum_file}" \
                                "${service_user}"
+
+            info "$(printf "Alpine: Provisioning image\n")"
+
+            # We need to apply changes to both partitions: A/B
+            provision_image "${path}/${file}" \
+                            "${mnt_path}" \
+                            "${user}" \
+                            2 \
+                            "${net_dev}" \
+                            "${net_address}" \
+                            "${net_gateway}" \
+                            "${ansible_user}" \
+                            "${ansible_roles}"
+
+            provision_image "${path}/${file}" \
+                            "${mnt_path}" \
+                            "${user}" \
+                            3 \
+                            "${net_dev}" \
+                            "${net_address}" \
+                            "${net_gateway}" \
+                            "${ansible_user}" \
+                            "${ansible_roles}"
             exit 0
             ;;
         gentoo)
-            gentoo_create_disk  "${img_path}" "${img_file}" "${mnt_path}"
+            gentoo_create_disk  "${img_path}" \
+                                "${img_file}" \
+                                "${mnt_path}"
+
+            info "$(printf "Gentoo: Provisioning image\n")"
+
+            # We need to apply changes to both partitions: A/B
+            # But we do not have partition B yet (not implemented for Gentoo)
+            provision "${img_path}/${img_file}" \
+                      "${mnt_path}" \
+                      "${user}" \
+                      3 \
+                      "${net_dev}" \
+                      "${net_address}" \
+                      "${net_gateway}" \
+                      "${ansible_user}" \
+                      "${ansible_roles}"
             exit 0
             ;;
         freebsd)
@@ -1192,9 +1392,13 @@ main() {
             chroot "${mnt_path}" "/bin/sh"
         fi
 
+        # Show mount content
+        ls "${mnt_path}"
+
         exit 0
     fi
 
+    # Write disk image to device
     if [ "write" == "${1}" ]; then
         # We need root privileges
         check_root
@@ -1214,7 +1418,6 @@ main() {
             exit 1
         fi
 
-        # Write disk image to device
         write_image_to_disk "${img_path}/${img_file}" "${device}"
 
         info "$(printf "image-builder: Done writing image\n")"
@@ -1223,6 +1426,26 @@ main() {
                 error "$(printf "Failed to send notification\n")"
             fi
         fi
+    fi
+
+    # Provision disk image
+    if [ "provision" == "${1}" ]; then
+        # We need root privileges
+        check_root
+
+        info "$(printf "Gentoo: Provisioning image\n")"
+
+        provision "${img_path}/${img_file}" \
+                  "${mnt_path}" \
+                  "${user}" \
+                  3 \
+                  "${net_dev}" \
+                  "${net_address}" \
+                  "${net_gateway}" \
+                  "${ansible_user}" \
+                  "${ansible_roles}"
+
+        exit 0
     fi
 
     # Run disk image
