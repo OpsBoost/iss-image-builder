@@ -11,6 +11,7 @@
 # bj.rn@baerlin.eu
 #
 # TODO:
+#   Use a proper language
 #   Use install instead of cp where appropriate
 #   Consider support for cloud-init
 #
@@ -334,6 +335,20 @@ write_net_config() {
     local path
     path="${mnt_path}/etc/systemd/system"
 
+# The interface gets renamed by systemd-udevd during boot
+# We need to wait for the actual name and use a path unit to this
+cat <<EOF > "${path}/net-interface.path"
+[Unit]
+Description=Monitor network interface
+
+[Path]
+PathChanged=/sys/class/net/enp0s1
+Unit=net-config.service
+
+[Install]
+WantedBy=getty.target
+EOF
+
 cat <<EOF > "${path}/net-config.service"
 [Unit]
 Description=Static Network Configuration
@@ -343,6 +358,8 @@ WantedBy=network.target
 
 [Service]
 Type=oneshot
+# Hack: The path condition does not work as intended yet
+ExecStart=/bin/sleep 3
 ExecStart=/bin/ip link set dev ${net_device} up
 ExecStart=/bin/ip addr add ${net_address} dev ${net_device}
 ExecStart=/bin/ip route add default via ${net_gateway}
@@ -350,6 +367,7 @@ EOF
 
     # Enable service
     ln -s -f "${path}/net-config.service" "${path}/getty.target.wants/net-config.service"
+    ln -s -f "${path}/net-interface.path" "${path}/getty.target.wants/net-config.service"
 }
 
 # Write config for wpa_supplicant
@@ -772,6 +790,56 @@ install_fonts() {
               "${path}"
 }
 
+# Create a temporary playbook to
+# provision host with given roles
+ansible_write_playbook() {
+    local roles_str
+    roles_str="${1}"
+    local file
+    file="$(mktemp)"
+
+cat <<EOF > "${file}"
+---
+- hosts: all
+
+  roles:
+EOF
+
+    while IFS=',' read -ra roles; do
+      for i in "${roles[@]}"; do
+        printf "    - %s\n" "${i}" >> "${file}"
+      done
+    done <<< "$roles_str"
+
+    echo "${file}"
+}
+
+# Run playbook
+ansible_run_playbook() {
+    local playbook
+    playbook="${1}"
+    local host
+    host="${2}"
+
+    # Do not ommit the comma
+    if ! ansible-playbook -v -i "${host}", "${playbook}"; then
+        error "Ansible: Failed during playbook execution"
+    fi
+}
+
+# Provision with Ansible
+ansible_provision() {
+    local ansible_user
+    ansible_user="${1}"
+    local ansible_roles
+    ansible_roles="${2}"
+    local playbook
+    playbook="$(ansible_write_playbook "${ansible_roles}")"
+
+    info "$(printf "Ansible: Running %s\n" "${playbook}")"
+    ansible_run_playbook "${playbook}" "${net_address}"
+}
+
 provision() {
     local disk_file
     disk_file="${1}"
@@ -815,7 +883,7 @@ provision() {
     if [ -n "${SSH_PUBKEY}" ]; then
         info "Adding SSH public key"
         local uid
-        uid="$(chroot_user_id ${mnt_path} ${ansible_user})"
+        uid="$(chroot_user_id "${mnt_path}" "${ansible_user}")"
         ssh_add_pubkey "${SSH_USER}" "${SSH_PUBKEY}" "${mnt_path}" "${uid}"
     fi
 
@@ -842,9 +910,11 @@ provision() {
     info "Installing fonts"
     install_fonts "${mnt_path}/home/${user}/.local/share/fonts"
 
-
     info "Configuring Sway"
     sway_configure_payload "${user}"
+
+    info "$(printf "Gentoo: Provisioning image with Ansible\n")"
+    ansible_provision "${ansible_user}" "${ansible_roles}"
 
     info "$(printf "Unmounting %s\n" "${mnt_path}")"
     umount "${mnt_path}"
@@ -1052,30 +1122,46 @@ net_dev_exists() {
     dev_name="${1}"
 
     local r
-    r="$(ip l | grep "${dev_name}")"
+    r="$(ip link | grep "${dev_name}")"
     r="$(trim "$r")"
 
     if [ "" == "${r}" ]; then
-        echo 0
-    else
         echo 1
+    else
+        echo 0
     fi
 }
 
 # Create a virtual network device
 net_create_dev() {
+    local dev_type
+    dev_type="${1}"
     local suffix
-    suffix="${1}"
+    suffix="${2}"
     local dev_name
-    dev_name="tap-${suffix}"
-
     local r
-    r="$(net_dev_exists "${dev_name}")"
 
-    if [ 1 != "$r" ] ; then
+    case "$dev_type" in
+    bridge)
+        dev_name="br-${suffix}"
+        r="$(net_dev_exists "${dev_name}")"
+        if [ 0 == "$r" ] ; then
+            return
+        fi
+        info "$(printf "Creating network device %s\n" "${dev_name}")"
+        ip link add name "${dev_name}" type bridge
+        ;;
+    tap)
+        dev_name="tap-${suffix}"
+        r="$(net_dev_exists "${dev_name}")"
+        if [ 0 == "$r" ] ; then
+            return
+        fi
         info "$(printf "Creating network device %s\n" "${dev_name}")"
         ip tuntap add mode tap "${dev_name}"
-    fi
+    esac
+
+    ip link set dev "${dev_name}" up
 }
 
 run_ansible_roles() {
@@ -1083,6 +1169,22 @@ run_ansible_roles() {
     roles="${1}"
     info "$(printf "Ansible: Applying roles %s\n" "${roles}")"
     exit 1
+}
+
+# Create a dedicated bridge network
+# to provision the host via Ansible
+virt_setup_network() {
+    local net_dev_suffix
+    net_dev_suffix="${1}"
+    local net_local_address
+    net_local_address="${2}"
+
+    net_create_dev "bridge" "${net_dev_suffix}"
+    if ! ip addr add "${net_local_address}" dev br-"${net_dev_suffix}"; then
+        debug "Failed to set IP address, might already be set"
+    fi
+    net_create_dev "tap" "${net_dev_suffix}"
+    ip link set tap-"${net_dev_suffix}" master br-"${net_dev_suffix}"
 }
 
 run_virt_linux() {
@@ -1101,7 +1203,9 @@ run_virt_linux() {
     local fw_vars
     fw_vars="${fw_path}/${fw_file_vars}"
     local net_dev_suffix
-    net_dev_suffix="vm"
+    net_dev_suffix="yyy"
+    local net_local_address
+    net_local_address="fd62:1d79:ef52:e133::1/64"
 
     # We need a local writeable copy of EFI vars
     if ! cp "${fw_vars}" .; then
@@ -1111,8 +1215,7 @@ run_virt_linux() {
     fi
 
     chown "${SUDO_USER}" "${fw_file_vars}"
-
-    net_create_dev "${net_dev_suffix}"
+    virt_setup_network "${net_dev_suffix}" "${net_local_address}"
 
     local cmd
     cmd="runuser -u ${SUDO_USER} -- \
@@ -1219,7 +1322,7 @@ main() {
 
     local net_address
     if [ -v "${NET_ADDRESS}" ]; then
-        net_address=""
+        net_address="fd62:1d79:ef52:e133::ffff/64"
     else
         net_address="${NET_ADDRESS}"
     fi
@@ -1339,6 +1442,7 @@ main() {
                       "${net_gateway}" \
                       "${ansible_user}" \
                       "${ansible_roles}"
+
             exit 0
             ;;
         freebsd)
