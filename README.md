@@ -1,11 +1,11 @@
 [![ShellCheck](https://github.com/OpsBoost/image-builder/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/OpsBoost/image-builder/actions/workflows/shellcheck.yml)
 # image-builder
-
+builds disk images consisting of
 - ESP with systemd-boot and kernel
 - Root filesystem with either Alpine, Gentoo or FreeBSD
 - Optional A/B partitioning scheme
 - Optional read-only rootfs
-
+for bare metal or use as virtual machines
 ## Usage
 ```
 $ image-builder help
@@ -60,6 +60,16 @@ If a wpa_supplicant.conf exists it gets copied to the image during post-build.
 Alternatively if wifi credentials are supplied via env during post-build,
 a config is created from those. Use WIFI_SECURITY, WIFI_ESSID, WIFI_PASSPHRASE, e.g. via
 the file *ENVIRONMENT* to supply confguration
+
+## Environment
+DEBUG  
+ANSIBLE_USER  
+ANSIBLE_ROLES  
+NET_DEV  
+NET_ADDRESS  
+NET_GATEWAY  
+SSH_USER  
+SSH_PUBKEY  
 
 # Resources
 [raspi-alpine builder](https://github.com/raspi-alpine/builder)  
