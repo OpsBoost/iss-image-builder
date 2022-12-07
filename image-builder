@@ -724,7 +724,7 @@ build_nanobsd_world() {
     local version
     version="$(freebsd-version)"
 
-    cd /usr/src/tools/tools/nanobsd
+    cd tools/tools/nanobsd
     sh nanobsd.sh
 }
 
