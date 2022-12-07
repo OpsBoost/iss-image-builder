@@ -720,11 +720,12 @@ build_freebsd_world() {
 }
 
 # We also use this in a github-action
-build_freebsd_nano() {
+build_nanobsd_world() {
     local version
     version="$(freebsd-version)"
 
-    make -j3 buildworld
+    cd /usr/src/tools/tools/nanobsd
+    sh nanobsd.sh
 }
 
 linux_install_kernel_build_dependencies() {
@@ -802,7 +803,9 @@ build_gentoo_stage3() {
 
 # We also use this in a github-action
 build_gentoo_binpkgs() {
+    info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
     install_podman
+    info "$(printf "Gentoo: Building binpkgs")"
     podman build -t gentoo-binpkgs .
 }
 
@@ -931,7 +934,6 @@ ansible_provision() {
     sleep 25
 
     info "$(printf "Ansible: Running %s\n" "${playbook}")"
-    cd "${ansible_roles_path}"
     ansible_run_playbook "${ansible_user}" \
                          "${playbook}" \
                          "${net_address}" \
@@ -1479,7 +1481,7 @@ main() {
     local ansible_user
     local ansible_roles
     local ansible_roles_path
-    if [ -v "${ANSIBLE_USER}" ]; then
+    if [ ! -v "${ANSIBLE_USER}" ]; then
         ansible_user=""
     else
         ansible_user="${ANSIBLE_USER}"
@@ -1524,7 +1526,13 @@ main() {
         freebsd)
             freebsd_install_build_dependencies
             build_freebsd_kernel "${freebsd_src_url}"
-            build_freebsd_nano
+            build_freebsd_world
+            exit 0
+            ;;
+        nanobsd)
+            freebsd_install_build_dependencies
+            build_freebsd_kernel "${freebsd_src_url}"
+            build_nanobsd_world
             exit 0
             ;;
         gentoo)
