@@ -10,6 +10,16 @@
 # © 2022 Björn Busse (see also: LICENSE)
 # bj.rn@baerlin.eu
 #
+# Dependencies:
+#
+#  [Linux]
+#  - ansible    [ansible]
+#  - bootctl    [systemd-boot]
+#  - dd         (coreutils)
+#  - fdisk      (util-linux)
+#  - losetup    (util-linux)
+#  - mkfs.xfs   (xfsprogs)
+#
 # TODO:
 #   Use a proper language
 #   Use install instead of cp where appropriate
@@ -40,12 +50,14 @@ SCRIPT_PATH="$(cd -- "${SCRIPT_PATH}" && pwd)"
 arch="amd64"
 
 # Kernel
-kernel_version="6.1.0-rc5"
-kernel_repo_url="https://github.com/bbusse/linux/releases/download/latest"
+kernel_version="6.1.0-rc8"
+kernel_repo_url="https://github.com/bbusse/linux-build/releases/download/latest"
 kernel="bzImage-${kernel_version}"
 kernel_url="${kernel_repo_url}/${kernel}"
 kernel_csum_file="${kernel}.sha384"
 kernel_csum_url="${kernel_repo_url}/${kernel_csum_file}"
+kernel_config_url="https://raw.githubusercontent.com/bbusse/config-kernel/main"
+kernel_flavour="default"
 
 img_file="iss-screen-device.img"
 
@@ -64,6 +76,9 @@ gentoo_stage3_repo_url="https://bouncer.gentoo.org/fetch/root/all/releases/amd64
 gentoo_stage3_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_file}"
 gentoo_stage3_csum_file="${gentoo_stage3_file}.sha256"
 gentoo_stage3_csum_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_csum_file}"
+
+# FreeBSD
+freebsd_src_url="https://github.com/freebsd/freebsd-src"
 
 log_level=info
 
@@ -227,7 +242,10 @@ download() {
     path="${2}"
 
     info "$(printf "Fetching: %s\n" "${url}")"
-    if ! curl -s -S --fail --output-dir "${path}" -LO "${url}"; then
+    # --output-dir needs a new enough cURL
+    # Ubuntu Focal does not have it
+    cd "${path}" || exit 1
+    if ! curl -s -S --fail -LO "${url}"; then
         error "$(printf "Failed to fetch file. Aborting..\n")"
         exit 1
     fi
@@ -263,11 +281,9 @@ chroot_user_id() {
     path="${1}"
     local user
     user="${2}"
-    local cmd
-    cmd="id -u ${user}"
 
     local uid
-    uid="$(chroot "${path}" /bin/sh -c "${cmd}")"
+    uid="$(cat ${path}/etc/passwd | grep ${user} | awk -F':' '{ print $3 }')"
     echo "${uid}"
 }
 
@@ -280,7 +296,8 @@ ssh_add_pubkey() {
     key="${2}"
     local path
     path="${3}/home/${user}"
-    local uid="${4}"
+    local uid
+    uid="${4}"
 
     mkdir -p "${path}"/.ssh/
     printf "%s" "${key}" > "${path}/.ssh/authorized_keys"
@@ -289,7 +306,7 @@ ssh_add_pubkey() {
 
     # Use uid when working on a different root (chroot)
     # because user mapping to uid can not work
-    if [ -z "${uid}" ]; then
+    if [ -n "${uid}" ]; then
         chown -R "${uid}":"${uid}" "${path}"
     else
         chown -R "${user}":"${user}" "${path}"
@@ -318,6 +335,32 @@ wifi_enable() {
         printf "\nrc_need=\"modules\"" >> "${mnt_path}/etc/conf.d/wpa_supplicant"
         printf "\nrc_need=\"wpa_supplicant\"" >> "${mnt_path}/etc/conf.d/udhcpd"
     fi
+}
+
+write_booted_service() {
+    local mnt_path
+    mnt_path="${1}"
+    local host
+    host="${2}"
+    local path
+    path="${mnt_path}/etc/systemd/system"
+
+cat <<EOF > "${path}/booted.service"
+[Unit]
+Description=Signal readiness to host
+After=net-config.service
+
+[Service]
+Type=oneshot
+ExecStart=sleep 5
+#ExecStart=/bin/sh -c "echo host_up | nc ${host} 1723"
+ExecStart=gonc -host [fdef:c181:4234:7978:64::23] -port :1723
+
+[Install]
+WantedBy=getty.target
+EOF
+
+    ln -s -f "${path}/booted.service" "${path}/getty.target.wants/booted.service"
 }
 
 # Write systemd-unit for static network config
@@ -367,7 +410,7 @@ EOF
 
     # Enable service
     ln -s -f "${path}/net-config.service" "${path}/getty.target.wants/net-config.service"
-    ln -s -f "${path}/net-interface.path" "${path}/getty.target.wants/net-config.service"
+    ln -s -f "${path}/net-interface.path" "${path}/getty.target.wants/net-config.path"
 }
 
 # Write config for wpa_supplicant
@@ -656,9 +699,15 @@ freebsd_install_build_dependencies() {
 
 # We also use this in a github-action
 build_freebsd_kernel() {
+    local freebsd_src_url
+    freebsd_src_url="${1}"
     local version
+
+    git clone "${freebsd_src_url}"
+    cd freebsd-src
     version="$(freebsd-version)"
 
+    info "$(printf "Building version: %s\n" "${version}")"
     make buildkernel
 }
 
@@ -678,17 +727,19 @@ build_freebsd_nano() {
     make -j3 buildworld
 }
 
-linux_install_build_dependencies() {
+linux_install_kernel_build_dependencies() {
     local os
 
     os=$(sys_os)
 
     case "$os" in
     debian)
+        ;&
+    ubuntu)
         # Install build dependencies
         apt update -y
-        apt install -y libelf-dev \
-                       linux-firmware \
+        apt install -y linux-firmware \
+                       libelf-dev \
                        intel-microcode
         ;;
     fedora)
@@ -701,10 +752,24 @@ linux_install_build_dependencies() {
 
 # We also use this in a github-action
 build_linux_kernel() {
+    local kernel_flavour
+    kernel_flavour="${1}"
     local kernel_version
-    kernel_version="${1}"
+    kernel_version="${2}"
 
+    if [ -z "${kernel_version}" ]; then
+        kernel_version="$(make kernelversion)"
+    fi
 
+    if [ "default" == "${kernel_flavour}" ]; then
+        make defconfig
+    else
+       kernel_config_url="${kernel_config_url}/kernel-config-${kernel_flavour}"
+       download "${kernel_config_url}"
+       mv "kernel-config-${kernel_flavour}" .config
+    fi
+
+    info "$(printf "Building kernel version %s for %s\n" "${kernel_version}" "${kernel_flavour}")"
     make -j3
 
     mv arch/x86_64/boot/bzImage "arch/x86_64/boot/bzImage-${kernel_version}"
@@ -801,6 +866,8 @@ ansible_write_playbook() {
 cat <<EOF > "${file}"
 ---
 - hosts: all
+  vars:
+    ansible_host_key_checking: false
 
   roles:
 EOF
@@ -816,13 +883,25 @@ EOF
 
 # Run playbook
 ansible_run_playbook() {
+    local user
+    user="${1}"
     local playbook
-    playbook="${1}"
+    playbook="${2}"
     local host
-    host="${2}"
+    host="${3}"
+    host="$(echo "${host%%/*}")"
+    local roles_path
+    roles_path="${4}"
+    local cmd
 
+    #runuser -l ansible-e2m -- /usr/bin/ansible-playbook -v -i "${host}", "${playbook}"
+    chown "${user}" "${playbook}"
     # Do not ommit the comma
-    if ! ansible-playbook -v -i "${host}", "${playbook}"; then
+    su -l "${user}" -c "ANSIBLE_ROLES_PATH="${ansible_roles_path}" \
+                        ANSIBLE_HOST_KEY_CHECKING=False \
+                        /usr/bin/ansible-playbook -v -i "${host}", "${playbook}""
+
+    if ! ${cmd}; then
         error "Ansible: Failed during playbook execution"
     fi
 }
@@ -831,15 +910,36 @@ ansible_run_playbook() {
 ansible_provision() {
     local ansible_user
     ansible_user="${1}"
+    local ansible_roles_path
+    ansible_roles_path="${2}"
     local ansible_roles
-    ansible_roles="${2}"
+    ansible_roles="${3}"
+    local img
+    img="${4}"
     local playbook
     playbook="$(ansible_write_playbook "${ansible_roles}")"
+    local port
+    port=1723
+
+    # Start machine
+    image-builder run &
+    # Wait for machine to be available
+    info "Ansible: Waitig for boot to finish"
+    # Gentoo's stage3 does not have netcat/socat
+    # Could use python
+    #nc -l "${port}"
+    sleep 25
 
     info "$(printf "Ansible: Running %s\n" "${playbook}")"
-    ansible_run_playbook "${playbook}" "${net_address}"
+    cd "${ansible_roles_path}"
+    ansible_run_playbook "${ansible_user}" \
+                         "${playbook}" \
+                         "${net_address}" \
+                         "${ansible_roles_path}"
 }
 
+# Do what's necessary for Ansible
+# to continue
 provision() {
     local disk_file
     disk_file="${1}"
@@ -857,8 +957,10 @@ provision() {
     net_gateway="${7}"
     local ansible_user
     ansible_user="${8}"
+    local ansible_roles_path
+    ansible_roles_path="${9}"
     local ansible_roles
-    ansible_roles="${9}"
+    ansible_roles="${10}"
 
     local disk_part_types
     disk_part_types=$(part_types "${disk_file}")
@@ -884,16 +986,19 @@ provision() {
         info "Adding SSH public key"
         local uid
         uid="$(chroot_user_id "${mnt_path}" "${ansible_user}")"
-        ssh_add_pubkey "${SSH_USER}" "${SSH_PUBKEY}" "${mnt_path}" "${uid}"
+        ssh_add_pubkey "${SSH_USER}" \
+                       "${SSH_PUBKEY}" \
+                       "${mnt_path}" \
+                       "${uid}"
     fi
 
     info "Writing network config"
-    write_net_config "${mnt_path}" "${net_device}" "${net_address}" "${net_gateway}"
+    write_net_config "${mnt_path}" \
+                     "${net_device}" \
+                     "${net_address}" \
+                     "${net_gateway}"
 
-    if [ -z "${ansible_roles}" ]; then
-        info "Running Ansible for image provisioning"
-        #run_ansible_roles "${ansible_roles}"
-    fi
+    write_booted_service "${mnt_path}" "${net_host_address}"
 
     info "Writing wpa config"
     write_wpa_supplicant_config "${mnt_path}" \
@@ -913,8 +1018,16 @@ provision() {
     info "Configuring Sway"
     sway_configure_payload "${user}"
 
-    info "$(printf "Gentoo: Provisioning image with Ansible\n")"
-    ansible_provision "${ansible_user}" "${ansible_roles}"
+    info "Enabling sshd"
+    service_enable "${mnt_path}" "sshd" "getty"
+
+    if [ -n "${ansible_roles}" ]; then
+        info "$(printf "Gentoo: Provisioning image with Ansible\n")"
+        ansible_provision "${ansible_user}" \
+                          "${ansible_roles_path}" \
+                          "${ansible_roles}" \
+                          "${disk_file}"
+    fi
 
     info "$(printf "Unmounting %s\n" "${mnt_path}")"
     umount "${mnt_path}"
@@ -1164,6 +1277,31 @@ net_create_dev() {
     ip link set dev "${dev_name}" up
 }
 
+service_enable() {
+    local path
+    path="${1}/etc/systemd/system"
+    local service
+    service="${2}"
+    local target
+    target="${3}"
+
+cat <<EOF > "${path}/${service}.service"
+[Unit]
+Description=OpenSSH server daemon
+After=net-config.service
+
+[Service]
+ExecStartPre=mount -o remount,rw /
+ExecStartPre=sleep 2
+ExecStartPre=/usr/bin/ssh-keygen -A
+ExecStart=/usr/sbin/sshd -D -e
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+EOF
+
+    ln -s -f "${path}/${service}.service" "${path}/${target}.target.wants/${service}.service"
+}
+
 run_ansible_roles() {
     local roles
     roles="${1}"
@@ -1229,10 +1367,7 @@ run_virt_linux() {
                     -drive format=raw,file=${disk_file}"
 
     info "$(printf "Running:\n%s\n" "$(echo -n "${cmd}" | fmt -u)")"
-    if ! ${cmd}; then
-        printf "Failed to start virtual machine\n"
-        exit 1
-    fi
+    $cmd
 }
 
 ansible_compose_roles() {
@@ -1320,9 +1455,16 @@ main() {
         net_dev="${NET_DEV}"
     fi
 
+    local net_host_address
+    if [ -v "${NET_HOST_ADDRESS}" ]; then
+        net_host_address="fd62:1d79:ef52:e133::1"
+    else
+        net_host_address="${NET_HOST_ADDRESS}"
+    fi
+
     local net_address
     if [ -v "${NET_ADDRESS}" ]; then
-        net_address="fd62:1d79:ef52:e133::ffff/64"
+        net_address="fd62:1d79:ef52:e133::ffff"
     else
         net_address="${NET_ADDRESS}"
     fi
@@ -1335,17 +1477,32 @@ main() {
     fi
 
     local ansible_user
+    local ansible_roles
+    local ansible_roles_path
     if [ -v "${ANSIBLE_USER}" ]; then
-        ansible_user="ansible"
+        ansible_user=""
     else
         ansible_user="${ANSIBLE_USER}"
     fi
 
-    local ansible_roles
-    if [ -v "${ANSIBLE_ROLES}" ]; then
-        ansible_roles="ansible"
+    if [ ! -v "${ANSIBLE_ROLES}" ]; then
+        ansible_roles=""
     else
         ansible_roles="${ANSIBLE_ROLES}"
+        if [ -z "${ANSIBLE_ROLES_PATH}" ]; then
+            error "Ansible: You need to specify the path to Ansible's roles"
+            exit 1
+        elif [ ! -d "${ANSIBLE_ROLES_PATH}" ]; then
+            error "$(printf "Ansible: The supplied roles path does not exist: %s\n" \
+                   "${ANSIBLE_ROLES_PATH}")"
+            exit 1
+        else
+            ansible_roles_path="${ANSIBLE_ROLES_PATH}"
+        fi
+    fi
+
+    if [ ! -v "${KERNEL_FLAVOUR}" ]; then
+        kernel_flavour="${KERNEL_FLAVOUR}"
     fi
 
     # Show help
@@ -1366,7 +1523,7 @@ main() {
             ;;
         freebsd)
             freebsd_install_build_dependencies
-            build_freebsd_kernel
+            build_freebsd_kernel "${freebsd_src_url}"
             build_freebsd_nano
             exit 0
             ;;
@@ -1376,8 +1533,8 @@ main() {
             exit 0
             ;;
         linux-kernel)
-            linux_install_build_dependencies
-            build_linux_kernel "${kernel_version}"
+            linux_install_kernel_build_dependencies
+            build_linux_kernel "${kernel_flavour}"
             exit 0
             ;;
         esac
@@ -1441,6 +1598,7 @@ main() {
                       "${net_address}" \
                       "${net_gateway}" \
                       "${ansible_user}" \
+                      "${ansible_roles_path}" \
                       "${ansible_roles}"
 
             exit 0
@@ -1547,6 +1705,7 @@ main() {
                   "${net_address}" \
                   "${net_gateway}" \
                   "${ansible_user}" \
+                  "${ansible_roles_path}" \
                   "${ansible_roles}"
 
         exit 0
