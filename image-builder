@@ -835,7 +835,7 @@ build_alpine() {
                -e DEFAULT_KERNEL_MODULES="*" \
                -e SIZE_ROOT_FS=1024M \
                -e SIZE_ROOT_PART=1024M \
-               -v "$PWD"/output:/output ghcr.io/raspi-alpine/builder
+               -v "${PWD}"/output:/output ghcr.io/raspi-alpine/builder
 
     sudo mv output/sdcard.img.gz iss-screen-device.img.gz
     sudo gunzip iss-screen-device.img.gz
@@ -853,8 +853,12 @@ build_gentoo_stage3() {
 build_gentoo_binpkgs() {
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
     install_podman
+
     info "$(printf "Gentoo: Building binpkgs")"
-    podman build --cap-add=SYS_PTRACE -t gentoo-binpkgs .
+    mkdir output
+    podman build --cap-add=SYS_PTRACE \
+                 -v "${PWD}"/output:/output \
+                 -t gentoo-binpkgs .
 }
 
 install_file() {
