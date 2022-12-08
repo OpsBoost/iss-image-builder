@@ -50,6 +50,7 @@ SCRIPT_PATH="$(cd -- "${SCRIPT_PATH}" && pwd)"
 arch="amd64"
 
 # Kernel
+kernel_src_url="https://github.com/torvalds/linux"
 kernel_version="6.1.0-rc8"
 kernel_repo_url="https://github.com/bbusse/linux-build/releases/download/latest"
 kernel="bzImage-${kernel_version}"
@@ -772,8 +773,7 @@ build_nanobsd_world() {
     local version
     version="$(freebsd-version)"
 
-    cd tools/tools/nanobsd
-    sh nanobsd.sh
+    sh tools/tools/nanobsd/nanobsd.sh
 }
 
 linux_install_kernel_build_dependencies() {
@@ -803,26 +803,49 @@ linux_install_kernel_build_dependencies() {
 build_linux_kernel() {
     local kernel_flavour
     kernel_flavour="${1}"
+    local build_use_container
+    build_use_container="${2}"
+    local build_target_arch
+    build_target_arch="${3}"
     local kernel_version
-    kernel_version="${2}"
+    kernel_version="${4}"
 
-    if [ -z "${kernel_version}" ]; then
-        kernel_version="$(make kernelversion)"
-    fi
-
-    if [ "default" == "${kernel_flavour}" ]; then
-        make defconfig
-    else
-       kernel_config_url="${kernel_config_url}/kernel-config-${kernel_flavour}"
-       download "${kernel_config_url}"
-       mv "kernel-config-${kernel_flavour}" .config
-    fi
+    kernel_config_url="${kernel_config_url}/kernel-config-${kernel_flavour}"
+    download "${kernel_config_url}"
 
     info "$(printf "Building kernel version %s for %s\n" "${kernel_version}" "${kernel_flavour}")"
-    make -j3
+    if [ 1 == "${build_use_container}" ]; then
+        if [ "amd64" == "${build_target_arch}" ]; then
+            platform="linux/amd64"
+        elif [ "arm64" == "${build_target_arch}" ]; then
+            platform="linux/arm64/v8"
+        else
+            error "$(printf "kernel-build: Unsupported build arch: " "${build_target_arch}")"
+            error "$(printf "kernel-build: BUILD_TARGET_ARCH must be amd64 or arm64")"
+        fi
 
-    mv arch/x86_64/boot/bzImage "arch/x86_64/boot/bzImage-${kernel_version}"
-    sha384sum "arch/x86_64/boot/bzImage-${kernel_version}" > "arch/x86_64/boot/bzImage-${kernel_version}.sha384"
+        mkdir -p "${PWD}/output"
+        git clone --depth 1 "${kernel_src_url}" output/linux
+
+        cd output/linux
+        if [ -z "${kernel_version}" ]; then
+            kernel_version="$(make kernelversion)"
+        fi
+        cd ../../
+
+        mv "kernel-config-${kernel_flavour}" output/linux/.config
+        podman build --cap-add=SYS_PTRACE \
+                     --platform "${platform}" \
+                     --build-arg KERNEL_VERSION="${kernel_version}" \
+                     -v "${PWD}"/output:/output \
+                     -t linux-build-container .
+    else
+        linux_install_kernel_build_dependencies
+        mv "kernel-config-${kernel_flavour}" .config
+        make -j3
+        mv arch/x86_64/boot/bzImage "arch/x86_64/boot/bzImage-${kernel_version}"
+        sha384sum "arch/x86_64/boot/bzImage-${kernel_version}" > "arch/x86_64/boot/bzImage-${kernel_version}.sha384"
+    fi
 }
 
 # We also use this in a github-action
@@ -1235,7 +1258,10 @@ gentoo_create_disk() {
                        "${kernel_version}"
 
     # Install files
-    install_kernel "${kernel}" "${esp_dev}" "${mnt_path}" "${kernel_version}"
+    install_kernel "${kernel}" \
+                   "${esp_dev}" \
+                   "${mnt_path}" \
+                   "${kernel_version}"
     install_rootfs "${rootfs_dev}" "${mnt_path}"
     install_binpkgs
 
@@ -1505,6 +1531,20 @@ main() {
         SEND_NOTIFICATION=0
     fi
 
+    local build_target_arch
+    if [ ! -v "${BUILD_TARGET_ARCH}" ]; then
+        build_target_arch="amd64"
+    else
+        build_target_arch="${BUILD_TARGET_ARCH}"
+    fi
+
+    local build_use_container
+    if [ ! -v "${BUILD_USE_CONTAINER}" ]; then
+        build_use_container=0
+    else
+        build_use_container="${BUILD_USE_CONTAINER}"
+    fi
+
     local net_dev
     if [ -v "${NET_DEV}" ]; then
         net_dev="enp0s1"
@@ -1563,8 +1603,10 @@ main() {
         fi
     fi
 
-    if [ ! -v "${KERNEL_FLAVOUR}" ]; then
+    if [ -v "${KERNEL_FLAVOUR}" ]; then
         kernel_flavour="${KERNEL_FLAVOUR}"
+    else
+        kernel_flavour="x230"
     fi
 
     # Show help
@@ -1601,8 +1643,9 @@ main() {
             exit 0
             ;;
         linux-kernel)
-            linux_install_kernel_build_dependencies
-            build_linux_kernel "${kernel_flavour}"
+            build_linux_kernel "${kernel_flavour}" \
+                               "${build_use_container}" \
+                               "${build_target_arch}"
             exit 0
             ;;
         esac
