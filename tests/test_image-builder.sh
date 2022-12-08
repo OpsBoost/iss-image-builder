@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
 setup_suite() {
-    sudo ./image-builder install
+    sudo ../image-builder install
     create_gentoo
 }
 
 create_gentoo() {
-    image-builder create gentoo
+    sudo image-builder create gentoo
 }
 
 test_disk_file_exists() {
