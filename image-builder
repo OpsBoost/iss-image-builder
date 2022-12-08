@@ -1683,6 +1683,12 @@ main() {
         fi
     fi
 
+    # Unmount
+    if [ "umount" == "${1}" ]; then
+        umount "${mnt_path}"
+        exit 0
+    fi
+
     # Write disk image to device
     if [ "write" == "${1}" ]; then
         # We need root privileges
