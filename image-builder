@@ -854,7 +854,7 @@ build_gentoo_binpkgs() {
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
     install_podman
     info "$(printf "Gentoo: Building binpkgs")"
-    podman build -t gentoo-binpkgs .
+    podman build --cap-add=SYS_PTRACE -t gentoo-binpkgs .
 }
 
 install_file() {
