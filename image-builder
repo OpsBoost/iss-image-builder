@@ -1074,6 +1074,15 @@ filesystem() {
     printf "%s" "${fs}"
 }
 
+disk_partitions() {
+    local disk_file
+    disk_file="${1}"
+    local partitions
+
+    partitions="$(fdisk -l iss-screen-device.img | grep "\.img\|^Device" | grep -v Disk)"
+    echo "${partitions}"
+}
+
 part_types() {
     local disk_file
     disk_file="${1}"
@@ -1304,13 +1313,6 @@ EOF
     ln -s -f "${path}/${service}.service" "${path}/${target}.target.wants/${service}.service"
 }
 
-run_ansible_roles() {
-    local roles
-    roles="${1}"
-    info "$(printf "Ansible: Applying roles %s\n" "${roles}")"
-    exit 1
-}
-
 # Create a dedicated bridge network
 # to provision the host via Ansible
 virt_setup_network() {
@@ -1487,9 +1489,7 @@ main() {
         ansible_user="${ANSIBLE_USER}"
     fi
 
-    if [ ! -v "${ANSIBLE_ROLES}" ]; then
-        ansible_roles=""
-    else
+    if [ -n "${ANSIBLE_ROLES}" ]; then
         ansible_roles="${ANSIBLE_ROLES}"
         if [ -z "${ANSIBLE_ROLES_PATH}" ]; then
             error "Ansible: You need to specify the path to Ansible's roles"
@@ -1666,6 +1666,21 @@ main() {
         ls "${mnt_path}"
 
         exit 0
+    fi
+
+    if [ "show" == "${1}" ] ; then
+        local object
+        object="${2}"
+        if [ -z "${object}" ]; then
+            error "$(printf "Missing argument\n")"
+            error "$(printf "The 'show' command needs an object to show\n")"
+            exit 1
+        elif [ "partitions" == "${object}" ]; then
+            local partitions
+            partitions="$(disk_partitions "${img}")"
+            info "$(printf "%s" "${partitions}")"
+            exit 0
+        fi
     fi
 
     # Write disk image to device
