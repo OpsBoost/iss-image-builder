@@ -337,6 +337,53 @@ wifi_enable() {
     fi
 }
 
+# There is no netcat or socat in Gentoo's stage3
+# so we use Python to signal readiness to the host
+write_booted_script() {
+    local mnt_path
+    mnt_path="${1}"
+    local path
+    path="${mnt_path}/usr/local/bin"
+
+cat <<EOF > "${path}/booted"
+#!/usr/bin/env python
+
+import os
+import socket
+import sys
+
+def signal_readiness(ip, port):
+        s = socket.socket()
+
+        try:
+            s.settimeout(3)
+            s.connect((ip,port))
+        except socket.error as msg:
+            s.close()
+            print("Could not open {}:{} {}".format(ip, port, msg))
+            return(1)
+        else:
+            s.close()
+            print("{}:{} is up".format(ip, port))
+            return(0)
+
+host = os.environ.get('SUPERVISE_HOST')
+port = os.environ.get('SUPERVISE_PORT')
+
+if not host:
+    print("You need to provide the address of the supervising host via SUPERVISE_HOST.\nAborting..")
+    sys.exit(1)
+
+if not port:
+    print("You need to provide the port of the supervising host via SUPERVISE_PORT.\nAborting..")
+    sys.exit(1)
+
+signal_readiness(host, int(port))
+EOF
+
+    chmod +x "${path}/booted"
+}
+
 write_booted_service() {
     local mnt_path
     mnt_path="${1}"
@@ -352,9 +399,10 @@ After=net-config.service
 
 [Service]
 Type=oneshot
+Environment=SUPERVISE_HOST=${host}
+Environment=SUPERVISE_PORT=${port}
 ExecStart=sleep 5
-#ExecStart=/bin/sh -c "echo host_up | nc ${host} 1723"
-ExecStart=gonc -host [fdef:c181:4234:7978:64::23] -port :1723
+ExecStart=/usr/local/bin/booted
 
 [Install]
 WantedBy=getty.target
@@ -1000,6 +1048,7 @@ provision() {
                      "${net_address}" \
                      "${net_gateway}"
 
+    write_booted_script "${mnt_path}" "${net_host_readiness_port}"
     write_booted_service "${mnt_path}" "${net_host_address}"
 
     info "Writing wpa config"
@@ -1464,6 +1513,13 @@ main() {
         net_host_address="fd62:1d79:ef52:e133::1"
     else
         net_host_address="${NET_HOST_ADDRESS}"
+    fi
+
+    local net_host_readiness_port
+    if [ -v "${NET_HOST_READINESS_PORT}" ]; then
+        net_host_readiness_port=1723
+    else
+        net_host_readiness_port="${NET_HOST_READINESS_PORT}"
     fi
 
     local net_address
