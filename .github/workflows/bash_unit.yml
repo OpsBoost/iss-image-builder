@@ -1,5 +1,5 @@
 ---
-name: bash_unit
+name: Tests
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  shellcheck:
+  bash_unit:
     name: bash_unit
     runs-on: ubuntu-latest
     steps:
