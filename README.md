@@ -62,9 +62,11 @@ a config is created from those. Use WIFI_SECURITY, WIFI_ESSID, WIFI_PASSPHRASE, 
 the file *ENVIRONMENT* to supply confguration
 
 ## Environment
-DEBUG  
 ANSIBLE_USER  
 ANSIBLE_ROLES  
+BUILD_TARGET_ARCH  
+BUILD_USE_CONTAINER  
+DEBUG  
 NET_DEV  
 NET_ADDRESS  
 NET_GATEWAY  
