@@ -79,7 +79,8 @@ gentoo_stage3_csum_file="${gentoo_stage3_file}.sha256"
 gentoo_stage3_csum_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_csum_file}"
 
 # FreeBSD
-freebsd_src_url="https://github.com/freebsd/freebsd-src"
+freebsd_source_url="https://github.com/freebsd/freebsd-src"
+freebsd_config_url="https://github.com/freebsd/freebsd-config"
 
 log_level=info
 
@@ -746,13 +747,19 @@ freebsd_install_build_dependencies() {
     pkg install -y curl python
 }
 
+freebsd_fetch_build_config() {
+    git clone --depth 1 "${freebsd_config_url}"
+    sudo cp freebsd-config/src.conf /etc/
+    sudo cp freebsd-config/make.conf /etc/
+}
+
 # We also use this in a github-action
 build_freebsd_kernel() {
-    local freebsd_src_url
-    freebsd_src_url="${1}"
+    local freebsd_source_url
+    freebsd_source_url="${1}"
     local version
 
-    git clone "${freebsd_src_url}"
+    git clone --depth 1 "${freebsd_source_url}"
     cd freebsd-src
     version="$(freebsd-version)"
 
@@ -1627,13 +1634,14 @@ main() {
             ;;
         freebsd)
             freebsd_install_build_dependencies
-            build_freebsd_kernel "${freebsd_src_url}"
+            freebsd_fetch_build_config
+            build_freebsd_kernel "${freebsd_source_url}"
             build_freebsd_world
             exit 0
             ;;
         nanobsd)
             freebsd_install_build_dependencies
-            build_freebsd_kernel "${freebsd_src_url}"
+            build_freebsd_kernel "${freebsd_source_url}"
             build_nanobsd_world
             exit 0
             ;;
