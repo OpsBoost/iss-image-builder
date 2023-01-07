@@ -80,7 +80,7 @@ gentoo_stage3_csum_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gen
 
 # FreeBSD
 freebsd_source_url="https://github.com/freebsd/freebsd-src"
-freebsd_config_url="https://github.com/freebsd/freebsd-config"
+freebsd_config_url="https://github.com/bbusse/freebsd-config"
 
 log_level=info
 
