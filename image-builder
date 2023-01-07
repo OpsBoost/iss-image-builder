@@ -767,7 +767,7 @@ build_freebsd_kernel() {
     make buildkernel
 
     mkdir -p /tmp/build
-    DESTIR=/tmp/build make installkernel
+    DESTDIR=/tmp/build make installkernel
 }
 
 # We also use this in a github-action
@@ -777,7 +777,7 @@ build_freebsd_world() {
 
     make -j3 buildworld
     mkdir -p /tmp/build
-    DESTIR=/tmp/build make installworld
+    DESTDIR=/tmp/build make installworld
 }
 
 # We also use this in a github-action
