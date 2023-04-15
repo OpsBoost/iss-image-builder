@@ -46,8 +46,10 @@ set -eo pipefail
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_PATH="$(dirname -- "${BASH_SOURCE[0]}")"
 SCRIPT_PATH="$(cd -- "${SCRIPT_PATH}" && pwd)"
+OS=$(uname)
 
-arch="amd64"
+target_arch="aarch64"
+platform="pine64"
 
 # Kernel
 kernel_src_url="https://github.com/torvalds/linux"
@@ -60,7 +62,13 @@ kernel_csum_url="${kernel_repo_url}/${kernel_csum_file}"
 kernel_config_url="https://raw.githubusercontent.com/bbusse/config-kernel/main"
 kernel_flavour="default"
 
-img_file="iss-screen-device.img"
+# Alma
+alma_version=9.1
+alma_repo_url="https://mirror.rackspeed.de/almalinux/9.1/isos/${target_arch}"
+alma_img_file="AlmaLinux-9.1-${target_arch}-minimal.iso"
+alma_img_url="${alma_repo_url}/${alma_img_file}"
+alma_csum_file="CHECKSUM"
+alma_csum_url="${alma_repo_url}/${alma_csum_file}"
 
 # Alpine
 alpine_version=latest
@@ -90,7 +98,7 @@ check_root() {
         if [ $UID != "0" ]; then
             printf "\n"
             error "$(printf "root privileges are needed\n")"
-            show_usage
+            printf "\n"
             exit 1
         fi
     fi
@@ -245,7 +253,6 @@ download() {
 
     info "$(printf "Fetching: %s\n" "${url}")"
     # --output-dir needs a new enough cURL
-    # Ubuntu Focal does not have it
     cd "${path}" || exit 1
     if ! curl -s -S --fail -LO "${url}"; then
         error "$(printf "Failed to fetch file. Aborting..\n")"
@@ -547,15 +554,27 @@ create_disk() {
     file_disk="${1}"
 
     info "$(printf "Creating disk file %s..\n" "${file_disk}")"
-    dd if=/dev/zero of="$file_disk" bs=1M count=8192 status=progress
+    dd if=/dev/zero of="${file_disk}" bs=1M count=8192 status=progress
 
-    # Create partition layout
-    parted "${file_disk}" mklabel gpt
-    parted "${file_disk}" mkpart fat32 1 2
-    parted "${file_disk}" mkpart fat32 3 259
-    parted "${file_disk}" mkpart xfs 260 8GB
-    parted "${file_disk}" set 2 boot on
-    parted "${file_disk}" print
+
+    case "$os" in
+    fedora)
+        # Create partition layout
+        parted "${file_disk}" mklabel gpt
+        parted "${file_disk}" mkpart fat32 1 2
+        parted "${file_disk}" mkpart fat32 3 259
+        parted "${file_disk}" mkpart xfs 260 8GB
+        parted "${file_disk}" set 2 boot on
+        parted "${file_disk}" print
+        ;;
+    freebsd)
+        loop_mount_freebsd "${file_disk}"
+        gpart create -s gpt /dev/md99
+        gpart add -t efi -s 512m -l efi0 /dev/md99
+        gpart add -t linux-data -l rootfs0 /dev/md99
+        loop_unmount_freebsd 99
+        ;;
+    esac
 }
 
 loop_exists() {
@@ -595,7 +614,23 @@ rootfs() {
 }
 
 # Set up loop mount
-loop_mount() {
+loop_mount_freebsd() {
+    local disk_file
+    disk_file="${1}"
+
+    r="$(mdconfig -l)"
+
+    if ! [ "$r" == "" ]; then
+        error "A loop mount exists"
+        exit 1
+    fi
+
+    info "$(printf "Mounting %s" "${disk_file}")"
+    mdconfig -a -t vnode -f "${disk_file}" -u 99
+}
+
+# Set up loop mount
+loop_mount_linux() {
     local disk_file
     disk_file="${1}"
 
@@ -627,8 +662,13 @@ loop_mount() {
     fi
 }
 
-# Tear down loop mount
-loop_unmount() {
+# FreeBSD: Tear down loop mount
+loop_unmount_freebsd() {
+    mdconfig -d -u "${1}"
+}
+
+# Linux: Tear down loop mount
+loop_unmount_linux() {
     losetup -D
 }
 
@@ -639,7 +679,21 @@ loop_mounts() {
     echo "${mounts}"
 }
 
-install_bootloader() {
+
+install_bootloader_u_boot() {
+    local img
+    local img="${1}"
+    local dev
+    local dev="${2}"
+
+    if dd if=${img} of=${dev} bs=1024 seek=8; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+install_bootloader_efi() {
     local esp_dev
     esp_dev="${1}"
     local rootfs_dev
@@ -1232,7 +1286,7 @@ gentoo_create_disk() {
     local path
     path="${1}"
     local disk_file
-    disk_file="${1}/${2}"
+    disk_file="${path}/${2}"
     local mnt_path
     mnt_path="${3}"
     local rootfs_dev
@@ -1242,47 +1296,47 @@ gentoo_create_disk() {
     local boot_entry_file
     boot_entry_file="${mnt_path}/loader/entries/linux-${kernel_version}.conf"
 
-    info "Fetching kernel"
-    download_miss "${path}" \
-                  "${kernel_url}" \
-                  "${kernel_csum_url}" \
-                  "${kernel_csum_file}"
+    local os
+    os="$(sys_os)"
 
-
-    info "Fetching stage3"
-    download_miss "${path}" \
-                  "${gentoo_stage3_url}" \
-                  "${gentoo_stage3_csum_url}" \
-                  "${gentoo_stage3_csum_file}"
-
-    info "$(printf "Creating disk %s\n" "${img_file}")"
     create_disk "${disk_file}"
-    loop_mount "${disk_file}"
+
+    case "$os" in
+    fedora)
+        loop_mount_linux "${disk_file}"
+        ;;
+    freebsd)
+        loop_mount_freebsd "${disk_file}"
+        ;;
+    esac
 
     # Create filesystems
-    if ! mkfs.vfat "${esp_dev}"; then
-        error "$(printf "Error: Failed to create filesystem\n")"
-        exit 1
-    fi
-    if ! mkfs.xfs "${rootfs_dev}"; then
-        error "$(printf "Error: Failed to create filesystem\n")"
-        exit 1
-    fi
+    case "$os" in
+    fedora)
+        if ! mkfs.vfat "${esp_dev}"; then
+            error "$(printf "Error: Failed to create filesystem\n")"
+            exit 1
+        fi
+        if ! mkfs.xfs "${rootfs_dev}"; then
+            error "$(printf "Error: Failed to create filesystem\n")"
+            exit 1
+        fi
+        ;;
+    freebsd)
+        esp_dev="/dev/md99p1"
+        rootfs_dev="/dev/md99p2"
+        if ! newfs_msdos -F32 -c 1 "${esp_dev}"; then
+            error "$(printf "Error: Failed to create filesystem\n")"
+            loop_unmount_freebsd 99
+            exit 1
+        fi
+        if ! mkfs.xfs "${rootfs_dev}"; then
+            error "$(printf "Error: Failed to create filesystem\n")"
+            exit 1
+        fi
+        ;;
+    esac
 
-    # Install EFI bootloader
-    install_bootloader "${esp_dev}" \
-                       "${rootfs_dev}" \
-                       "${mnt_path}" \
-                       "${boot_entry_file}" \
-                       "${kernel_version}"
-
-    # Install files
-    install_kernel "${kernel}" \
-                   "${esp_dev}" \
-                   "${mnt_path}" \
-                   "${kernel_version}"
-    install_rootfs "${rootfs_dev}" "${mnt_path}"
-    install_binpkgs
 
     # Remove disk
     loop_unmount
@@ -1296,27 +1350,14 @@ write_image_to_disk() {
     local notify
     notify="${3}"
 
-    local file_size
-    file_size=$(du -h -b "${file}" | cut -f1)
+    file_size=$(du -h -B 1 "${file}" | cut -f1)
+
     info "$(printf "Writing %s to %s (%sM)\n" "${file}" "${dev}" "${file_size}")"
     if dd if="${file}" of="${dev}" bs=2M status=progress; then
-        info "image-builder: Image successfully written\n"
-        if $notify; then
-            if ! notify-send "image-builder: Image successfully written"; then
-                error "Failed to send notification"
-            fi
-        fi
-        exit 0
+        echo 0
     else
-        error "Failed writing image\nIs a card or device inserted?\n"
-        if $notify; then
-            if ! notify-send "image-builder: Failed writing image"; then
-                error "Failed to send notification"
-            fi
-        fi
+        echo 1
     fi
-
-    exit 1
 }
 
 ovmf_path() {
@@ -1384,6 +1425,22 @@ net_create_dev() {
     esac
 
     ip link set dev "${dev_name}" up
+}
+
+# Show potential devices for writing an image
+# e.g. USB mass storage or MMC
+disk_show_storage_devices() {
+    local os
+    os=$(sys_os)
+
+    case "$os" in
+    freebsd)
+        info $(printf "%s\n\n" "Found the following devices:")
+        camcontrol devlist
+        ;;
+    fedora)
+        ;;
+    esac
 }
 
 service_enable() {
@@ -1674,14 +1731,48 @@ main() {
 
     # Create disk image
     if [ "create" == "${1}" ]; then
-        # We need root privileges
-        check_root
-
         local target_os
         target_os="${2}"
 
         case "$target_os" in
+        alma)
+            # We need root privileges
+            check_root
+
+            target_img_file="alma.img"
+            download "${alma_csum_url}" "${img_path}"
+            local csum
+            local csum_file
+            csum_file="${img_path}/${alma_img_file}.sha256"
+            csum=$(awk "/SHA256/ && /${alma_img_file}/" ${img_path}/${alma_csum_file})
+            echo "${csum}" > "${csum_file}"
+
+            if [ -f "${img_path}/${alma_img_file}" ]; then
+                info "$(printf "Alma: Checking checksum..\n")"
+                if ! sha256sum -c "${csum_file}"; then
+                    download "${alma_img_url}" "${img_path}"
+                fi
+            else
+                download "${alma_img_url}" "${img_path}"
+            fi
+
+            info "$(printf "The image was downloaded successfully\n")"
+
+            gentoo_create_disk  "${img_path}" \
+                                "${target_img_file}" \
+                                "${mnt_path}"
+
+            printf "\n"
+            disk_show_storage_devices
+            printf "\n"
+            info "$(printf "%s\n\n" "You can continue with")"
+            info "$(printf " # image-builder write ${target_os} [DEVICE]")"
+            exit 0
+            ;;
         alpine)
+            # We need root privileges
+            check_root
+
             alpine_create_disk "${img_path}" \
                                "${img_file}" \
                                "${alpine_img_url}" \
@@ -1717,6 +1808,34 @@ main() {
             gentoo_create_disk  "${img_path}" \
                                 "${img_file}" \
                                 "${mnt_path}"
+
+            info "Fetching kernel"
+            download_miss "${path}" \
+                          "${kernel_url}" \
+                          "${kernel_csum_url}" \
+                          "${kernel_csum_file}"
+
+
+            info "Fetching stage3"
+            download_miss "${path}" \
+                          "${gentoo_stage3_url}" \
+                          "${gentoo_stage3_csum_url}" \
+                          "${gentoo_stage3_csum_file}"
+
+            # Install EFI bootloader
+            install_bootloader_efi "${esp_dev}" \
+                                   "${rootfs_dev}" \
+                                   "${mnt_path}" \
+                                   "${boot_entry_file}" \
+                                   "${kernel_version}"
+
+            # Install files
+            install_kernel "${kernel}" \
+                           "${esp_dev}" \
+                           "${mnt_path}" \
+                           "${kernel_version}"
+            install_rootfs "${rootfs_dev}" "${mnt_path}"
+            install_binpkgs
 
             info "$(printf "Gentoo: Provisioning image\n")"
 
@@ -1818,29 +1937,70 @@ main() {
         # We need root privileges
         check_root
 
+        local img
+        local img="${2}"
+        local img_file
+
+        case "$img" in
+        alma)
+            img_file="${alma_img_file}"
+            ;;
+        iss)
+            img_file="iss-screen-device.img"
+            ;;
+        *)
+            error "Please specify the image to write: One of 'alma, iss'\n"
+        esac
+
+        if ! [ -f "${img_path}/${img_file}" ]; then
+            error "$(printf "A local image for '${img}' does not exist")"
+            info "You need to create one first"
+            printf "\n"
+            info " # image-builder create alma"
+            exit 1
+        fi
+
         local device
-        device="${2}"
+        device="${3}"
         if [ "" == "${device}" ]; then
-            printf "Missing block device\n"
+            printf "Missing device\n"
             printf "The 'write' command needs a device to write to\n"
             exit 1
         fi
 
-        if [ ! -b "${device}" ]; then
+        # test -c is needed for usb mass storage device on FreeBSD
+        # -b works on Linux
+        if ! [ -b "${device}" ] && ! [ -c "${device}" ]; then
             printf "Unsupported device: %s\n" "${device}"
             printf "Is a card or device inserted?\n"
-            printf "Not writing\n"
+            printf "Not writing image\n"
             exit 1
         fi
 
-        write_image_to_disk "${img_path}/${img_file}" "${device}"
+        local r
+        r=$(write_image_to_disk "${img_path}/${img_file}" "${device}")
 
-        info "$(printf "image-builder: Done writing image\n")"
+        if [ 0 != "$r" ]; then
+            error "Failed to write image"
+        fi
+
+        if [ "pine64" = "${platform}" ]; then
+            # FreeBSD Ports contains builds for Pine64/RockPro64
+            local img_bootloader
+            img_bootloader="/usr/local/share/u-boot/u-boot-pine64/u-boot-sunxi-with-spl.bin"
+            info "Writing u-boot bootloader"
+            install_bootloader_u_boot "${img_bootloader}" "${device}"
+        fi
+
         if $SEND_NOTIFICATION; then
             if ! notify-send "image-builder: Done writing image"; then
                 error "$(printf "Failed to send notification\n")"
             fi
         fi
+
+        info "$(printf "image-builder: Done writing image\n")"
+
+        exit 0
     fi
 
     # Provision disk image
