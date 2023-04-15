@@ -747,13 +747,13 @@ freebsd_install_build_dependencies() {
     pkg install -y curl python
 }
 
+# src.conf / make.conf / release.conf
 freebsd_fetch_build_config() {
     git clone --depth 1 "${freebsd_config_url}"
     sudo cp freebsd-config/src.conf /etc/
     sudo cp freebsd-config/make.conf /etc/
 }
 
-# We also use this in a github-action
 build_freebsd_kernel() {
     local freebsd_source_url
     freebsd_source_url="${1}"
@@ -770,7 +770,6 @@ build_freebsd_kernel() {
     DESTDIR=/tmp/build make installkernel
 }
 
-# We also use this in a github-action
 build_freebsd_world() {
     local version
     version="$(freebsd-version)"
@@ -780,7 +779,15 @@ build_freebsd_world() {
     DESTDIR=/tmp/build make installworld
 }
 
-# We also use this in a github-action
+build_freebsd_release() {
+    local version
+    version="$(freebsd-version)"
+
+    mkdir /release
+    cp freebsd-config/release.conf /etc/
+    sh -c release/release.sh -c /etc/release.conf
+}
+
 build_nanobsd_world() {
     local version
     version="$(freebsd-version)"
@@ -1640,8 +1647,9 @@ main() {
         freebsd)
             freebsd_install_build_dependencies
             freebsd_fetch_build_config
-            build_freebsd_kernel "${freebsd_source_url}"
-            build_freebsd_world
+            build_freebsd_release
+            #build_freebsd_kernel "${freebsd_source_url}"
+            #build_freebsd_world
             exit 0
             ;;
         nanobsd)
