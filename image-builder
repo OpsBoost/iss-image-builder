@@ -85,6 +85,7 @@ gentoo_stage3_repo_url="https://bouncer.gentoo.org/fetch/root/all/releases/amd64
 gentoo_stage3_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_file}"
 gentoo_stage3_csum_file="${gentoo_stage3_file}.sha256"
 gentoo_stage3_csum_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_csum_file}"
+gentoo_config_url="https://github.com/bbusse/gentoo-config"
 
 # FreeBSD
 freebsd_source_url="https://github.com/freebsd/freebsd-src"
@@ -959,6 +960,13 @@ build_alpine() {
     sudo sha384sum iss-screen-device.img.xz | sudo tee iss-screen-device.img.xz.sha384
 }
 
+gentoo_fetch_config() {
+    local url
+    url="${1}"
+
+    git clone --depth 1 "${url}"
+}
+
 # Build a Gentoo stage3 with catalyst
 # We also use this in a github-action
 build_gentoo_stage3() {
@@ -971,7 +979,7 @@ build_gentoo_binpkgs() {
     install_podman
 
     info "$(printf "Gentoo: Building binpkgs")"
-    mkdir "${PWD}"/output
+    mkdir -p "${PWD}"/output
     podman build --cap-add=SYS_PTRACE \
                  -v "${PWD}"/output:/output \
                  -t gentoo-binpkgs .
@@ -1739,6 +1747,7 @@ main() {
             ;;
         gentoo)
             build_gentoo_stage3
+            gentoo_fetch_config "${gentoo_config_url}"
             build_gentoo_binpkgs
             exit 0
             ;;
