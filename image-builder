@@ -808,12 +808,16 @@ freebsd_fetch_build_config() {
     sudo cp freebsd-config/make.conf /etc/
 }
 
-build_freebsd_kernel() {
+freebsd_fetch_src() {
     local freebsd_source_url
     freebsd_source_url="${1}"
-    local version
 
     git clone --depth 1 "${freebsd_source_url}"
+}
+
+build_freebsd_kernel() {
+    local version
+
     cd freebsd-src
     version="$(freebsd-version)"
 
@@ -836,10 +840,26 @@ build_freebsd_world() {
 build_freebsd_release() {
     local version
     version="$(freebsd-version)"
+    local src_path
+    src_path="freebsd-src"
+    # target_path is the CHROOTDIR
+    # the release script builds in
+    local target_path
+    target_path="/release"
+    local release_archive
+    release_archive="freebsd-${version}.tar.xz"
 
-    mkdir /release
-    cp freebsd-config/release.conf /etc/
-    sh -c release/release.sh -c /etc/release.conf
+    info "$(printf "Building release for version %s\n" "${version}")"
+    mkdir -p "$target_path/etc"
+    cp freebsd-config/release.conf "$target_path/etc"
+    cp /etc/make.conf "$target_path/etc"
+    cp /etc/src.conf "$target_path/etc"
+
+    cd "${src_path}"
+    sh -c "release/release.sh -c $target_path/etc"
+
+    info "$(printf "Creating compressed archive: %s\n" "${release_archive}")"
+    tar cJf "${release_archive}" "${target_path}"
 }
 
 build_nanobsd_world() {
@@ -1704,14 +1724,16 @@ main() {
         freebsd)
             freebsd_install_build_dependencies
             freebsd_fetch_build_config
+            freebsd_fetch_src "${freebsd_source_url}"
             build_freebsd_release
-            #build_freebsd_kernel "${freebsd_source_url}"
+            #build_freebsd_kernel
             #build_freebsd_world
             exit 0
             ;;
         nanobsd)
             freebsd_install_build_dependencies
-            build_freebsd_kernel "${freebsd_source_url}"
+            freebsd_fetch_src "${freebsd_source_url}"
+            #build_freebsd_kernel
             build_nanobsd_world
             exit 0
             ;;
