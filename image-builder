@@ -975,6 +975,9 @@ build_gentoo_stage3() {
 
 # We also use this in a github-action
 build_gentoo_binpkgs() {
+    local flavour
+    flavour="$1"
+
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
     install_podman
 
@@ -982,7 +985,8 @@ build_gentoo_binpkgs() {
     mkdir -p "${PWD}"/output
     podman build --cap-add=SYS_PTRACE \
                  -v "${PWD}"/output:/output \
-                 -t gentoo-binpkgs .
+                 -t "gentoo-binpkgs-$flavour"
+                 -f "Containerfile-$flavour"
 }
 
 install_file() {
@@ -1745,10 +1749,16 @@ main() {
             build_nanobsd_world
             exit 0
             ;;
-        gentoo)
+        gentoo-container)
             build_gentoo_stage3
             gentoo_fetch_config "${gentoo_config_url}"
-            build_gentoo_binpkgs
+            build_gentoo_binpkgs "container"
+            exit 0
+            ;;
+        gentoo-sway)
+            build_gentoo_stage3
+            gentoo_fetch_config "${gentoo_config_url}"
+            build_gentoo_binpkgs "sway"
             exit 0
             ;;
         linux-kernel)
