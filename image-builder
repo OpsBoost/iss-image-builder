@@ -899,8 +899,8 @@ build_linux_kernel() {
     kernel_flavour="${1}"
     local build_use_container
     build_use_container="${2}"
-    local build_target_arch
-    build_target_arch="${3}"
+    local target_arch
+    target_arch="${3}"
     local kernel_version
     kernel_version="${4}"
 
@@ -909,13 +909,13 @@ build_linux_kernel() {
 
     info "$(printf "Building kernel version %s for %s\n" "${kernel_version}" "${kernel_flavour}")"
     if [ 1 == "${build_use_container}" ]; then
-        if [ "amd64" == "${build_target_arch}" ]; then
+        if [ "amd64" == "${target_arch}" ]; then
             platform="linux/amd64"
-        elif [ "arm64" == "${build_target_arch}" ]; then
+        elif [ "arm64" == "${target_arch}" ]; then
             platform="linux/arm64/v8"
         else
-            error "$(printf "kernel-build: Unsupported build arch: " "${build_target_arch}")"
-            error "$(printf "kernel-build: BUILD_TARGET_ARCH must be amd64 or arm64")"
+            error "$(printf "kernel-build: Unsupported build arch: " "${target_arch}")"
+            error "$(printf "kernel-build: target_arch must be amd64 or arm64")"
         fi
 
         mkdir -p "${PWD}/output"
@@ -929,7 +929,7 @@ build_linux_kernel() {
 
         mv "kernel-config-${kernel_flavour}" output/linux/.config
         podman build --cap-add=SYS_PTRACE \
-                     --platform "${platform}" \
+                     --platform="${platform}" \
                      --build-arg KERNEL_VERSION="${kernel_version}" \
                      -v "${PWD}"/output:/output \
                      -t linux-build-container .
@@ -974,18 +974,24 @@ build_gentoo_stage3() {
 }
 
 # We also use this in a github-action
-build_gentoo_binpkgs() {
+build_gentoo_stage4() {
     local flavour
     flavour="$1"
+    local arch
+    arch="$2"
+
+    local platform
+    platform="linux/$arch"
 
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
     install_podman
 
-    info "$(printf "Gentoo: Building binpkgs")"
+    info "$(printf "Gentoo: Building stage4")"
     mkdir -p "${PWD}"/output
     podman build --cap-add=SYS_PTRACE \
+                 --platform="${platform}" \
                  -v "${PWD}"/output:/output \
-                 -t "gentoo-binpkgs-$flavour" \
+                 -t "gentoo-stage4-$flavour" \
                  -f "Containerfile-$flavour"
 }
 
@@ -1639,13 +1645,6 @@ main() {
         SEND_NOTIFICATION=0
     fi
 
-    local build_target_arch
-    if [ ! -v "${BUILD_TARGET_ARCH}" ]; then
-        build_target_arch="amd64"
-    else
-        build_target_arch="${BUILD_TARGET_ARCH}"
-    fi
-
     local build_use_container
     if [ ! -v "${BUILD_USE_CONTAINER}" ]; then
         build_use_container=0
@@ -1727,6 +1726,12 @@ main() {
     if [ "build" == "${1}" ]; then
         local target_os
         target_os="${2}"
+        local target_arch
+        target_arch="${3}"
+
+        if [ -z "${target_arch}" ]; then
+            target_arch="${BUILD_TARGET_ARCH:="amd64"}"
+        fi
 
         case "$target_os" in
         alpine)
@@ -1752,19 +1757,19 @@ main() {
         gentoo-container)
             build_gentoo_stage3
             gentoo_fetch_config "${gentoo_config_url}"
-            build_gentoo_binpkgs "container"
+            build_gentoo_stage4 "container" "$target_arch"
             exit 0
             ;;
         gentoo-sway)
             build_gentoo_stage3
             gentoo_fetch_config "${gentoo_config_url}"
-            build_gentoo_binpkgs "sway"
+            build_gentoo_stage4 "sway" "$target_arch"
             exit 0
             ;;
         linux-kernel)
             build_linux_kernel "${kernel_flavour}" \
                                "${build_use_container}" \
-                               "${build_target_arch}"
+                               "${target_arch}"
             exit 0
             ;;
         esac
