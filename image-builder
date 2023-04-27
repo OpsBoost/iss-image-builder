@@ -985,7 +985,7 @@ build_gentoo_binpkgs() {
     mkdir -p "${PWD}"/output
     podman build --cap-add=SYS_PTRACE \
                  -v "${PWD}"/output:/output \
-                 -t "gentoo-binpkgs-$flavour"
+                 -t "gentoo-binpkgs-$flavour" \
                  -f "Containerfile-$flavour"
 }
 
