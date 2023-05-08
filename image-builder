@@ -59,7 +59,6 @@ kernel_url="${kernel_repo_url}/${kernel}"
 kernel_csum_file="${kernel}.sha384"
 kernel_csum_url="${kernel_repo_url}/${kernel_csum_file}"
 kernel_config_url="https://raw.githubusercontent.com/bbusse/config-kernel/main"
-kernel_flavour="default"
 
 # Alma
 alma_version=9.1
@@ -894,7 +893,7 @@ linux_install_kernel_build_dependencies() {
 }
 
 # We also use this in a github-action
-build_linux_kernel() {
+linux_build_kernel() {
     local kernel_flavour
     kernel_flavour="${1}"
     local build_use_container
@@ -907,32 +906,41 @@ build_linux_kernel() {
     kernel_config_url="${kernel_config_url}/kernel-config-${kernel_flavour}"
     download "${kernel_config_url}"
 
-    info "$(printf "Building kernel version %s for %s\n" "${kernel_version}" "${kernel_flavour}")"
-    if [ 1 == "${build_use_container}" ]; then
-        if [ "amd64" == "${target_arch}" ]; then
+    # Set to 'latest' for now, if not given
+    # We'll determine the exact version later
+    if [ -z "${kernel_version}" ]; then
+        kernel_version="latest"
+    fi
+
+    info "$(printf "Building kernel version %s for %s with arch %s\n" "${kernel_version}" "${kernel_flavour}" "${target_arch}")"
+    if [ 1 = "${build_use_container}" ]; then
+        if [ "amd64" = "${target_arch}" ]; then
             platform="linux/amd64"
-        elif [ "arm64" == "${target_arch}" ]; then
-            platform="linux/arm64/v8"
+        elif [ "arm64" = "${target_arch}" ]; then
+            platform="linux/arm64"
         else
-            error "$(print "kernel-build: Unsupported build arch: " "${target_arch}")"
-            error "$(print "kernel-build: target_arch must be amd64 or arm64")"
+            error "$(printf "kernel-build: Unsupported build arch: %s\n" "${target_arch}")"
+            error "kernel-build: target_arch must be amd64 or arm64\n"
         fi
 
         mkdir -p "${PWD}/output"
         git clone --depth 1 "${kernel_src_url}" output/linux
 
         cd output/linux
+
         if [ -z "${kernel_version}" ]; then
             kernel_version="$(make kernelversion)"
         fi
+
         cd ../../
 
         mv "kernel-config-${kernel_flavour}" output/linux/.config
         podman build --cap-add=SYS_PTRACE \
-                     --platform="${platform}" \
+                     --arch="${target_arch}" \
                      --build-arg KERNEL_VERSION="${kernel_version}" \
                      -v "${PWD}"/output:/output \
-                     -t linux-build-container .
+                     -t linux-kernel-build-${kernel_flavour} \
+                     -f Containerfile
     else
         linux_install_kernel_build_dependencies
         mv "kernel-config-${kernel_flavour}" .config
@@ -942,7 +950,6 @@ build_linux_kernel() {
     fi
 }
 
-# We also use this in a github-action
 build_alpine() {
     sudo docker run --privileged --rm multiarch/qemu-user-static --persistent yes
     docker run --rm \
@@ -991,7 +998,7 @@ build_gentoo_stage4() {
     podman build --cap-add=SYS_PTRACE \
                  --platform="${platform}" \
                  -v "${PWD}"/output:/output \
-                 -t "gentoo-stage4-$flavour" \
+                 -t "gentoo-stage4-$flavour-$arch" \
                  -f "Containerfile-$flavour"
 }
 
@@ -1710,12 +1717,6 @@ main() {
         fi
     fi
 
-    if [ -v "${KERNEL_FLAVOUR}" ]; then
-        kernel_flavour="${KERNEL_FLAVOUR}"
-    else
-        kernel_flavour="x230"
-    fi
-
     # Show help
     if [ "help" == "${1}" ]; then
         show_usage
@@ -1724,16 +1725,12 @@ main() {
 
     # Build
     if [ "build" == "${1}" ]; then
-        local target_os
-        target_os="${2}"
+        local build_target
+        build_target="${2}"
         local target_arch
         target_arch="${3}"
 
-        if [ -z "${target_arch}" ]; then
-            target_arch="${BUILD_TARGET_ARCH:="amd64"}"
-        fi
-
-        case "$target_os" in
+        case "$build_target" in
         alpine)
             build_alpine
             exit 0
@@ -1754,10 +1751,10 @@ main() {
             build_nanobsd_world
             exit 0
             ;;
-        gentoo-container)
+        gentoo-containeros)
             build_gentoo_stage3
             gentoo_fetch_config "${gentoo_config_url}"
-            build_gentoo_stage4 "container" "$target_arch"
+            build_gentoo_stage4 "containeros" "$target_arch"
             exit 0
             ;;
         gentoo-sway)
@@ -1767,9 +1764,39 @@ main() {
             exit 0
             ;;
         linux-kernel)
-            build_linux_kernel "${kernel_flavour}" \
+            target_arch="$4"
+
+            if [ -n "${3}" ]; then
+                kernel_flavour="${3}"
+            else
+                error "Please specify a kernel flavour\nAborting.."
+                exit 1
+            fi
+
+            if [ -z "${target_arch}" ]; then
+                case "$kernel_flavour" in
+                    pine64)
+                    target_arch="arm64"
+                    ;;
+                    rockpro64)
+                    target_arch="arm64"
+                    ;;
+                    x230)
+                    target_arch="amd64"
+                    ;;
+                    *)
+                    error "Please specify a target architecture\nAborting.."
+                    exit 1
+                esac
+            fi
+
+            linux_build_kernel "${kernel_flavour}" \
                                "${build_use_container}" \
                                "${target_arch}"
+            exit 0
+            ;;
+        openwrt)
+            openwrt_build "${flavour}"
             exit 0
             ;;
         esac
@@ -1777,10 +1804,10 @@ main() {
 
     # Create disk image
     if [ "create" == "${1}" ]; then
-        local target_os
-        target_os="${2}"
+        local build_target
+        build_target="${2}"
 
-        case "$target_os" in
+        case "$build_target" in
         alma)
             # We need root privileges
             check_root
@@ -1812,7 +1839,7 @@ main() {
             disk_show_storage_devices
             printf "\n"
             info "$(printf "%s\n\n" "You can continue with")"
-            info "$(printf " # image-builder write %s [DEVICE]" "${target_os}")"
+            info "$(printf " # image-builder write %s [DEVICE]" "${build_target}")"
             exit 0
             ;;
         alpine)
