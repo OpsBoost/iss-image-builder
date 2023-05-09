@@ -667,6 +667,22 @@ loop_mount_linux() {
     fi
 }
 
+loop_unmount() {
+    local disk_file
+    disk_file="$1"
+
+    os="$(sys_os)"
+
+    case "$os" in
+    fedora)
+        loop_unmount_linux
+        ;;
+    freebsd)
+        loop_unmount_freebsd "${disk_file}"
+        ;;
+    esac
+}
+
 # FreeBSD: Tear down loop mount
 loop_unmount_freebsd() {
     mdconfig -d -u "${1}"
