@@ -89,6 +89,10 @@ gentoo_config_url="https://github.com/bbusse/gentoo-config"
 freebsd_source_url="https://github.com/freebsd/freebsd-src"
 freebsd_config_url="https://github.com/bbusse/freebsd-config"
 
+# OpenWRT
+openwrt_source_url="https://github.com/bbusse/openwrt"
+openwrt_config_url="https://github.com/bbusse/openwrt-config"
+
 log_level=info
 
 
@@ -1002,6 +1006,19 @@ build_gentoo_stage4() {
                  -f "Containerfile-$flavour"
 }
 
+openwrt_build() {
+    local flavour
+    flavour="$1"
+
+    info "$(printf "OpenWrt: Fetching config")"
+    git clone --depth 1 -b dev "${openwrt_source_url}"
+    cd openwrt
+    git clone --depth 1 "${openwrt_config_url}"
+    mv openwrt-config/openwrt-config-"$flavour" .config
+
+    make V=s
+}
+
 install_file() {
     local src
     src="${1}"
@@ -1796,6 +1813,14 @@ main() {
             exit 0
             ;;
         openwrt)
+
+            if [ -n "${3}" ]; then
+                flavour="${3}"
+            else
+                error "Please specify a flavour to build\nAborting.."
+                exit 1
+            fi
+
             openwrt_build "${flavour}"
             exit 0
             ;;
