@@ -817,6 +817,19 @@ install_podman() {
     esac
 }
 
+container_platform() {
+    local target_arch
+    target_arch="$1"
+
+    if [ "amd64" = "${target_arch}" ]; then
+        echo "linux/amd64"
+    elif [ "arm64" = "${target_arch}" ]; then
+        echo "linux/arm64"
+    else
+        echo ""
+    fi
+}
+
 freebsd_install_build_dependencies() {
     # Install build dependencies
     pkg install -y curl python
@@ -934,12 +947,11 @@ linux_build_kernel() {
 
     info "$(printf "Building kernel version %s for %s with arch %s\n" "${kernel_version}" "${kernel_flavour}" "${target_arch}")"
     if [ 1 = "${build_use_container}" ]; then
-        if [ "amd64" = "${target_arch}" ]; then
-            platform="linux/amd64"
-        elif [ "arm64" = "${target_arch}" ]; then
-            platform="linux/arm64"
-        else
-            error "$(printf "kernel-build: Unsupported build arch: %s\n" "${target_arch}")"
+        local platform
+        platform=$(container_platform "$target_arch")
+
+        if [ -z "$platform" ]; then
+            error "$(printf "kernel-build: Unsupported target arch: %s\n" "${target_arch}")"
             error "kernel-build: target_arch must be amd64 or arm64\n"
         fi
 
@@ -955,12 +967,12 @@ linux_build_kernel() {
         cd ../../
 
         mv "kernel-config-${kernel_flavour}" output/linux/.config
-        podman build --cap-add=SYS_PTRACE \
-                     --arch="${target_arch}" \
-                     --build-arg KERNEL_VERSION="${kernel_version}" \
-                     -v "${PWD}"/output:/output \
-                     -t linux-kernel-build-${kernel_flavour} \
-                     -f Containerfile
+        podman buildx build --cap-add=SYS_PTRACE \
+                            --platform="${platform}" \
+                            --build-arg KERNEL_VERSION="${kernel_version}" \
+                            -v "${PWD}"/output:/output \
+                            -t linux-kernel-build-${kernel_flavour} \
+                            -f Containerfile
     else
         linux_install_kernel_build_dependencies
         mv "kernel-config-${kernel_flavour}" .config
@@ -1004,22 +1016,28 @@ build_gentoo_stage3() {
 build_gentoo_stage4() {
     local flavour
     flavour="$1"
-    local arch
-    arch="$2"
+    local target_arch
+    target_arch="$2"
 
     local platform
-    platform="linux/$arch"
+    platform=$(container_platform "$target_arch")
+
+    if [ -z "$platform" ]; then
+        error "$(printf "gentoo-build: Unsupported target arch: %s\n" "${target_arch}")"
+        error "gentoo-build: target_arch must be amd64 or arm64\n"
+    fi
 
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
     install_podman
 
     info "$(printf "Gentoo: Building stage4")"
     mkdir -p "${PWD}"/output
-    podman build --cap-add=SYS_PTRACE \
-                 --platform="${platform}" \
-                 -v "${PWD}"/output:/output \
-                 -t "gentoo-stage4-$flavour-$arch" \
-                 -f "Containerfile-$flavour"
+
+    podman buildx build --cap-add=SYS_PTRACE \
+                        --platform="${platform}" \
+                        -v "${PWD}"/output:/output \
+                        -t "gentoo-stage4-$flavour-$arch" \
+                        -f "Containerfile-$flavour"
 }
 
 openwrt_build() {
@@ -1377,6 +1395,10 @@ gentoo_create_disk() {
     local os
     os="$(sys_os)"
 
+    if [ -z "$disk_file" ]; then
+        error "$(printf "Missing disk file.\n Please provide a disk file to use.\nAborting..")"
+    fi
+
     create_disk "${disk_file}"
 
     case "$os" in
@@ -1662,16 +1684,6 @@ main() {
     local mnt_path
     mnt_path=/mnt/tmp
 
-    local img_path
-    if [ -v "${OLDPWD}" ]; then
-        img_path="${OLDPWD}"
-    else
-        img_path="${PWD}"
-    fi
-
-    local img
-    img="${img_path}/${img_file}"
-
     # Source vars
     if [ -f ENVIRONMENT ]; then
         source ENVIRONMENT
@@ -1847,6 +1859,19 @@ main() {
     if [ "create" == "${1}" ]; then
         local build_target
         build_target="${2}"
+
+        local img_path
+        local img_file
+        img_file="$build_target".raw
+
+        if [ -v "${OLDPWD}" ]; then
+            img_path="${OLDPWD}"
+        else
+            img_path="${PWD}"
+        fi
+
+        local img
+        img="${img_path}/${img_file}"
 
         case "$build_target" in
         alma)
