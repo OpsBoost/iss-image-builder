@@ -1,4 +1,4 @@
-[![ShellCheck](https://github.com/OpsBoost/image-builder/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/OpsBoost/image-builder/actions/workflows/shellcheck.yml)
+[![ShellCheck](https://github.com/OpsBoost/image-builder/actions/workflows/shellcheck.yml/badge.svg?branch=CI)](https://github.com/OpsBoost/image-builder/actions/workflows/shellcheck.yml)
 # image-builder
 builds disk images consisting of
 - ESP with systemd-boot and kernel
