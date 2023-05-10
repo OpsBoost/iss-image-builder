@@ -784,6 +784,37 @@ sys_os() {
     echo "${os}"
 }
 
+sys_arch() {
+    local os
+    os=$(sys_os)
+
+    local arch
+
+    case $os in
+    freebsd)
+        arch=$(uname -p)
+        ;;
+    fedora)
+        ;&
+    debian)
+        ;&
+    ubuntu)
+        arch=$(uname -m)
+        ;;
+    esac
+
+    case "$arch" in
+        aarch64)
+        arch="arm64"
+        ;;
+        i686)
+        arch="i386"
+        ;;
+    esac
+
+    echo "$arch"
+}
+
 install_podman() {
     local os
     local cmd
@@ -808,7 +839,9 @@ container_platform() {
     local target_arch
     target_arch="$1"
 
-    if [ "amd64" = "${target_arch}" ]; then
+    if [ "x86_64" = "${target_arch}" ]; then
+        echo "linux/amd64"
+    elif [ "amd64" = "${target_arch}" ]; then
         echo "linux/amd64"
     elif [ "arm64" = "${target_arch}" ]; then
         echo "linux/arm64"
@@ -1010,8 +1043,9 @@ build_gentoo_stage4() {
     platform=$(container_platform "$target_arch")
 
     if [ -z "$platform" ]; then
-        error "$(printf "gentoo-build: Unsupported target arch: %s\n" "${target_arch}")"
+        error "$(printf "gentoo-build: Unsupported target platform: %s\n" "${target_arch}")"
         error "gentoo-build: target_arch must be amd64 or arm64\n"
+        exit 1
     fi
 
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
@@ -1733,6 +1767,15 @@ main() {
         build_target="${2}"
         local target_arch
         target_arch="${3}"
+
+        # Take target_arch from env if not provided
+        # on command line or fall back to host arch
+        # if none given
+        if [ -z "$target_arch" ]; then
+            local host_arch
+            host_arch=$(sys_arch)
+            target_arch="${TARGET_ARCH:-$host_arch}"
+        fi
 
         case "$build_target" in
         alpine)
