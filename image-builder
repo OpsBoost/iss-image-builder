@@ -817,7 +817,21 @@ sys_arch() {
     echo "$arch"
 }
 
-install_podman() {
+# Add repository for a newer version of podman
+podman_add_repo() {
+    local ubuntu_version
+    ubuntu_version="22.04"
+
+    podman_repo_key_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}/Release.key"
+    podman_repo_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}"
+
+    echo "deb $podman_repo_url/ /" | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list
+    curl -fsSL $podman_repo_key_url | gpg --dearmor | tee /etc/apt/trusted.gpg.d/devel_kubic_libcontainers_unstable.gpg > /dev/null
+    apt update
+}
+
+# Install podman
+podman_install() {
     local os
     local cmd
 
@@ -1054,7 +1068,9 @@ build_gentoo_stage4() {
     fi
 
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
-    install_podman
+
+    podman_add_repo
+    podman_install
 
     info "$(printf "Gentoo: Building stage4")"
     mkdir -p "${PWD}"/output
