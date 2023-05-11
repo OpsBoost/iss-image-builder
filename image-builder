@@ -994,6 +994,12 @@ linux_build_kernel() {
             error "kernel-build: target_arch must be amd64 or arm64\n"
         fi
 
+        if [ "1" = "${PODMAN_USE_EXTERNAL_REPO:-1}" ]; then
+            podman_add_repo
+        fi
+
+        podman_install
+
         mkdir -p "${PWD}/output"
         git clone --depth 1 "${kernel_src_url}" output/linux
 
