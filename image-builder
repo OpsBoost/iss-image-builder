@@ -1083,6 +1083,7 @@ build_gentoo_stage4() {
     local path_containerfile
     path_containerfile="gentoo-build"
     cd "$path_containerfile"
+    gentoo_fetch_config "${gentoo_config_url}"
     mkdir output
 
     podman buildx build --cap-add=SYS_PTRACE \
@@ -1831,13 +1832,11 @@ main() {
             ;;
         gentoo-containeros)
             build_gentoo_stage3
-            gentoo_fetch_config "${gentoo_config_url}"
             build_gentoo_stage4 "containeros" "$target_arch"
             exit 0
             ;;
         gentoo-sway)
             build_gentoo_stage3
-            gentoo_fetch_config "${gentoo_config_url}"
             build_gentoo_stage4 "sway" "$target_arch"
             exit 0
             ;;
