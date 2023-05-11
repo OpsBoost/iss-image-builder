@@ -1019,6 +1019,13 @@ linux_build_kernel() {
 }
 
 build_alpine() {
+    local target_image_name
+    target_image_name="$1"
+
+    if [ -z "$target_image_name" ]; then
+        target_image_name="${TARGET_IMAGE_NAME:-"alpine"}"
+    fi
+
     git clone --depth 1 "$alpine_config_url"
 
     sudo docker run --privileged --rm multiarch/qemu-user-static --persistent yes
@@ -1032,10 +1039,10 @@ build_alpine() {
                -e SIZE_ROOT_PART=1024M \
                -v "${PWD}"/output:/output ghcr.io/raspi-alpine/builder
 
-    sudo mv output/sdcard.img.gz iss-screen-device.img.gz
-    sudo gunzip iss-screen-device.img.gz
-    sudo xz iss-screen-device.img
-    sudo sha384sum iss-screen-device.img.xz | sudo tee iss-screen-device.img.xz.sha384
+    sudo mv output/sdcard.img.gz "$target_image_name".img.gz
+    sudo gunzip "$target_image_name".img.gz
+    sudo xz "$target_image_name".img
+    sudo sha384sum "$target_image_name".img.xz | sudo tee "$target_image_name".img.xz.sha384
 }
 
 gentoo_fetch_config() {
@@ -1069,7 +1076,7 @@ build_gentoo_stage4() {
 
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
 
-    if [ "1" = "${PODMAN_USE_EXTERNAL_REPO:-0}" ]; then
+    if [ "1" = "${PODMAN_USE_EXTERNAL_REPO:-1}" ]; then
         podman_add_repo
     fi
 
@@ -1377,7 +1384,7 @@ disk_partitions() {
     disk_file="${1}"
     local partitions
 
-    partitions="$(fdisk -l iss-screen-device.img | grep "\.img\|^Device" | grep -v Disk)"
+    partitions=$(fdisk -l "$disk_file" | grep "\.img\|^Device" | grep -v Disk)
     echo "${partitions}"
 }
 
@@ -1811,7 +1818,7 @@ main() {
 
         case "$build_target" in
         alpine)
-            build_alpine
+            build_alpine ""
             exit 0
             ;;
         freebsd)
@@ -2116,8 +2123,8 @@ main() {
         alma)
             img_file="${alma_img_file}"
             ;;
-        iss)
-            img_file="iss-screen-device.img"
+        alpine)
+            img_file="alpine.img"
             ;;
         *)
             error "Please specify the image to write: One of 'alma, iss'\n"
