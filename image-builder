@@ -84,12 +84,13 @@ gentoo_stage3_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_s
 gentoo_stage3_csum_file="${gentoo_stage3_file}.sha256"
 gentoo_stage3_csum_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_csum_file}"
 gentoo_config_url="https://github.com/bbusse/gentoo-config"
+gentoo_build_container_url="https://github.com/bbusse/gentoo-build"
 
 # FreeBSD
 freebsd_source_url="https://github.com/freebsd/freebsd-src"
 freebsd_config_url="https://github.com/bbusse/freebsd-config"
 
-# OpenWRT
+# OpenWrt
 openwrt_source_url="https://github.com/bbusse/openwrt"
 openwrt_config_url="https://github.com/bbusse/openwrt-config"
 
@@ -1058,11 +1059,16 @@ build_gentoo_stage4() {
     info "$(printf "Gentoo: Building stage4")"
     mkdir -p "${PWD}"/output
 
+    git clone --depth 1 "$gentoo_build_container_url"
+
+    local path_containerfile
+    path_containerfile="gentoo-build"
+
     podman buildx build --cap-add=SYS_PTRACE \
                         --platform="${platform}" \
                         -v "${PWD}"/output:/output \
-                        -t "gentoo-stage4-$flavour-$target_arch" \
-                        -f "Containerfile-$flavour"
+                        -t gentoo-stage4-"$flavour-$target_arch" \
+                        -f "$path_containerfile"/Containerfile-"$flavour"
 }
 
 openwrt_build() {
