@@ -1080,6 +1080,7 @@ build_gentoo_stage4() {
     local path_containerfile
     path_containerfile="gentoo-build"
     cd "$path_containerfile"
+    mkdir output
 
     podman buildx build --cap-add=SYS_PTRACE \
                         --platform="${platform}" \
