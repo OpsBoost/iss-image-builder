@@ -95,6 +95,7 @@ openwrt_source_url="https://github.com/bbusse/openwrt"
 openwrt_config_url="https://github.com/bbusse/openwrt-config"
 
 # Podman
+ubuntu_version="22.04"
 podman_repo_key_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}/Release.key"
 podman_repo_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}"
 
@@ -823,9 +824,6 @@ sys_arch() {
 
 # Add repository for a newer version of podman
 podman_add_repo() {
-    local ubuntu_version
-    ubuntu_version="22.04"
-
     info "$(printf "podman: Upgrading from repo for Ubuntu %s\n" "${ubuntu_version}")"
 
     sudo sh -c "echo \"deb $podman_repo_url/ /\" | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list"
