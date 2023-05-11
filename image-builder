@@ -1079,12 +1079,13 @@ build_gentoo_stage4() {
 
     local path_containerfile
     path_containerfile="gentoo-build"
+    cd "$path_containerfile"
 
     podman buildx build --cap-add=SYS_PTRACE \
                         --platform="${platform}" \
                         -v "${PWD}"/output:/output \
                         -t gentoo-stage4-"$flavour-$target_arch" \
-                        -f "$path_containerfile"/Containerfile-"$flavour"
+                        -f Containerfile-"$flavour"
 }
 
 openwrt_build() {
