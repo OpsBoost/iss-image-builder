@@ -71,6 +71,7 @@ alma_csum_url="${alma_repo_url}/${alma_csum_file}"
 alpine_version=latest
 alpine_compressed_img_file="${img_file}".xz
 alpine_repo_url="https://github.com/OpsBoost/iss-image-build/releases/download"
+alpine_config_url="https://github.com/bbusse/alpine-config"
 alpine_img_url="${alpine_repo_url}/${alpine_version}/${alpine_compressed_img_file}"
 alpine_csum_file="${alpine_compressed_img_file}".sha384
 alpine_csum_url="${alpine_repo_url}/${alpine_version}/${alpine_csum_file}"
@@ -1003,10 +1004,13 @@ linux_build_kernel() {
 }
 
 build_alpine() {
+    git clone --depth 1 "$alpine_config_url"
+
     sudo docker run --privileged --rm multiarch/qemu-user-static --persistent yes
+
     docker run --rm \
-               --mount type=bind,source="${PWD}"/input/image.sh,target=/input/image.sh \
-               --mount type=bind,source="${PWD}"/input/modules,target=/input/modules \
+               --mount type=bind,source="${PWD}"/alpine-config/input/image.sh,target=/input/image.sh \
+               --mount type=bind,source="${PWD}"/alpine-config/input/modules,target=/input/modules \
                -e ARCH=armhf \
                -e DEFAULT_KERNEL_MODULES="*" \
                -e SIZE_ROOT_FS=1024M \
