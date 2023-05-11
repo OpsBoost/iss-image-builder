@@ -94,6 +94,10 @@ freebsd_config_url="https://github.com/bbusse/freebsd-config"
 openwrt_source_url="https://github.com/bbusse/openwrt"
 openwrt_config_url="https://github.com/bbusse/openwrt-config"
 
+# Podman
+podman_repo_key_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}/Release.key"
+podman_repo_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}"
+
 log_level=info
 
 
@@ -822,8 +826,7 @@ podman_add_repo() {
     local ubuntu_version
     ubuntu_version="22.04"
 
-    podman_repo_key_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}/Release.key"
-    podman_repo_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${ubuntu_version}"
+    info "$(printf "podman: Upgrading from repo for Ubuntu %s\n" "${ubuntu_version}")"
 
     sudo sh -c "echo \"deb $podman_repo_url/ /\" | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list"
     sudo sh -c "curl -fsSL $podman_repo_key_url | gpg --dearmor | tee /etc/apt/trusted.gpg.d/devel_kubic_libcontainers_unstable.gpg > /dev/null"
