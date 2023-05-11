@@ -1069,7 +1069,10 @@ build_gentoo_stage4() {
 
     info "$(printf "Gentoo: Installing build dependenies for Gentoo build")"
 
-    podman_add_repo
+    if [ "1" = "${PODMAN_USE_EXTERNAL_REPO:-0}" ]; then
+        podman_add_repo
+    fi
+
     podman_install
 
     info "$(printf "Gentoo: Building stage4")"
