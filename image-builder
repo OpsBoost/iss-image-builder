@@ -1981,7 +1981,9 @@ main() {
             info "$(printf " # image-builder write %s [DEVICE]" "${build_target}")"
             exit 0
             ;;
-        alpine)
+        alpine-sway)
+            ;&
+        alpine-containeros)
             # We need root privileges
             check_root
 
