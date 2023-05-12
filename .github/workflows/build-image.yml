@@ -18,7 +18,7 @@ jobs:
     strategy:
       matrix:
         arch: ["amd64"]
-        flavour: ["gentoo-containeros", "alpine"]
+        flavour: ["gentoo-containeros", "alpine-containeros", "alma"]
 
     name: Build
     runs-on: ubuntu-latest
