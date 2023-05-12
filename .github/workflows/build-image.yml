@@ -1,0 +1,37 @@
+name: Build Disk Image
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+    branches:
+      - '**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+    branches:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  build-disk-image:
+    strategy:
+      matrix:
+        arch: ["amd64"]
+        flavour: ["gentoo-containeros", "alpine"]
+
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout image-builder
+        uses: actions/checkout@v3
+        with:
+          repository: 'OpsBoost/image-builder'
+          ref: 'dev'
+          path: 'image-builder'
+
+      - name: Build
+        run: |
+          sudo ./image-builder/image-builder install
+          image-builder build ${{ matrix.flavour }}
