@@ -1102,6 +1102,7 @@ build_gentoo_stage4() {
 
     podman buildx build --cap-add=SYS_PTRACE \
                         --platform="${platform}" \
+                        --build-arg TARGETARCH="$target_arch" \
                         -v "${PWD}"/output:/output \
                         -t gentoo-stage4-"$flavour-$target_arch" \
                         -f Containerfile-"$flavour"
