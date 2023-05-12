@@ -83,6 +83,7 @@ gentoo_stage3_repo_url="https://bouncer.gentoo.org/fetch/root/all/releases/amd64
 gentoo_stage3_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_file}"
 gentoo_stage3_csum_file="${gentoo_stage3_file}.sha256"
 gentoo_stage3_csum_url="${gentoo_stage3_repo_url}/${gentoo_stage3_version}/${gentoo_stage3_csum_file}"
+gentoo_stage4_repo_url="https://github.com/bbusse/gentoo-build/releases/tag"
 gentoo_config_url="https://github.com/bbusse/gentoo-config"
 gentoo_build_container_url="https://github.com/bbusse/gentoo-build"
 
@@ -1026,8 +1027,10 @@ linux_build_kernel() {
 }
 
 build_alpine() {
+    local target_flavour
+    target_flavour="$1"
     local target_image_name
-    target_image_name="$1"
+    target_image_name="$2"
 
     if [ -z "$target_image_name" ]; then
         target_image_name="${TARGET_IMAGE_NAME:-"alpine"}"
@@ -1038,8 +1041,8 @@ build_alpine() {
     sudo docker run --privileged --rm multiarch/qemu-user-static --persistent yes
 
     docker run --rm \
-               --mount type=bind,source="${PWD}"/alpine-config/input/image.sh,target=/input/image.sh \
-               --mount type=bind,source="${PWD}"/alpine-config/input/modules,target=/input/modules \
+               --mount type=bind,source="${PWD}"/alpine-config/"$target_flavour"/input/image.sh,target=/input/image.sh \
+               --mount type=bind,source="${PWD}"/alpine-config/"$target_flavour"/input/modules,target=/input/modules \
                -e ARCH=armhf \
                -e DEFAULT_KERNEL_MODULES="*" \
                -e SIZE_ROOT_FS=1024M \
@@ -1059,10 +1062,27 @@ gentoo_fetch_config() {
     git clone --depth 1 "${url}"
 }
 
+gentoo_fetch_stage4() {
+    local target_flavour
+    target_flavour="$1"
+    local target_arch
+    target_arch="$2"
+    local target_version
+    target_version="$3"
+
+    gentoo_stage4_file="gentoo-stage4-${target_flavour}-${target_arch}-${target_version}.tar.xz"
+    gentoo_stage4_url="${gentoo_stage4_repo_url}/${target_version}/${gentoo_stage4_file}"
+}
+
 # Build a Gentoo stage3 with catalyst
 # We also use this in a github-action
 build_gentoo_stage3() {
     info "$(printf "Gentoo: stage3 build not implemented\n")"
+    info "Fetching stage3"
+    download_miss "${path}" \
+                  "${gentoo_stage3_url}" \
+                  "${gentoo_stage3_csum_url}" \
+                  "${gentoo_stage3_csum_file}"
 }
 
 # We also use this in a github-action
@@ -1153,10 +1173,6 @@ install_rootfs() {
     printf "\n"
     ls "${2}"
     umount "${1}"
-}
-
-install_binpkgs() {
-    echo "0"
 }
 
 install_fonts() {
@@ -1826,7 +1842,7 @@ main() {
 
         case "$build_target" in
         alpine)
-            build_alpine ""
+            build_alpine "desktop-sway" ""
             exit 0
             ;;
         freebsd)
@@ -1990,7 +2006,9 @@ main() {
                             "${ansible_roles}"
             exit 0
             ;;
-        gentoo)
+        gentoo-containeros)
+            ;&
+        gentoo-sway)
             gentoo_create_disk  "${img_path}" \
                                 "${img_file}" \
                                 "${mnt_path}"
@@ -2001,12 +2019,7 @@ main() {
                           "${kernel_csum_url}" \
                           "${kernel_csum_file}"
 
-
-            info "Fetching stage3"
-            download_miss "${path}" \
-                          "${gentoo_stage3_url}" \
-                          "${gentoo_stage3_csum_url}" \
-                          "${gentoo_stage3_csum_file}"
+            gentoo_fetch_stage4 "containeros" "$target_arch"
 
             # Install EFI bootloader
             install_bootloader_efi "${esp_dev}" \
@@ -2020,8 +2033,8 @@ main() {
                            "${esp_dev}" \
                            "${mnt_path}" \
                            "${kernel_version}"
+
             install_rootfs "${rootfs_dev}" "${mnt_path}"
-            install_binpkgs
 
             info "$(printf "Gentoo: Provisioning image\n")"
 
