@@ -32,8 +32,7 @@
 #     Build NanoBSD edition
 #
 #   Gentoo:
-#     Check stage3 checksum
-#     Check binpkgs checksum
+#     Check stage3/4 checksums
 #     Support A/B partitioning scheme as with Alpine
 #
 #    Make sure /etc/machine-id and /etc/os-release exist
@@ -102,15 +101,35 @@ podman_repo_url="https://download.opensuse.org/repositories/devel:/kubic:/libcon
 
 log_level=info
 
-
+# Check if we got root privileges
+# Return 0 if privileged, 1 otherwise
 check_root() {
     if [ -z ${SUDO_USER+x} ]; then
         if [ $UID != "0" ]; then
+            echo 1
+        fi
+    fi
+
+    echo 0
+}
+
+# Check if we got root privileges
+# Fail if unprivileged
+check_root_fail() {
+    if [ -z ${SUDO_USER+x} ]; then
+        if [ $UID != "0" ]; then
             printf "\n"
-            error "$(printf "root privileges are needed\n")"
+            error "$(printf "Need root privileges. Please restart privileged.\nAborting..\n")"
             printf "\n"
             exit 1
         fi
+    fi
+}
+
+reexec_privileged() {
+    if [ "$(id -u)" != "0" ]; then
+        sudo "$SCRIPT_PATH"/"$SCRIPT_NAME" $args
+        exit 0
     fi
 }
 
@@ -592,7 +611,6 @@ loop_exists() {
 # or 1 if none exists
 loop_device() {
     local loop_dev
-
     loop_dev="$(losetup -f)"
 
     if [ "/dev/loop0" == "${loop_dev}" ]; then
@@ -634,7 +652,7 @@ loop_mount_linux() {
     local disk_file
     disk_file="${1}"
 
-    if [ 1 == "$(loop_exists)" ]; then
+    if [ 2 == "$(loop_exists)" ]; then
         local loop_dev
         loop_dev="$(loop_device)"
         local mounts
@@ -651,13 +669,15 @@ loop_mount_linux() {
         printf "Remove existing loop devices to poceed:\n"
         printf "%s\n\n" "${loop_dev}"
         printf " # losetup -D\n\n"
-        printf "Aborting..\n"
+        losetup -l
+        printf "\nAborting..\n"
         exit 1
     fi
 
     modprobe loop
-    if ! losetup -P -f "${disk_file}"; then
+    if ! sudo losetup -P -f "${disk_file}"; then
         error "$(printf "Failed to loop mount %s\n" "${disk_file}")"
+        dmesg
         exit 1
     fi
 }
@@ -721,8 +741,13 @@ install_bootloader_efi() {
     local version
     version="${5}"
 
+    info "Installing bootloader to ESP"
+    reexec_privileged
+
+    mkdir -p "$path"
+
     if ! mount "${esp_dev}" "${path}"; then
-        error "$(printf "Failed to install bootloader to efi sysem partition (esp)\n")"
+        error "$(printf "Failed to install bootloader to efi system partition (esp)\n")"
         exit 1
     fi
 
@@ -1026,7 +1051,7 @@ linux_build_kernel() {
     fi
 }
 
-build_alpine() {
+alpine_build() {
     local target_flavour
     target_flavour="$1"
     local target_image_name
@@ -1070,6 +1095,7 @@ gentoo_fetch_stage4() {
     local target_version
     target_version="$3"
 
+    info "gentoo: Fetching stage4"
     gentoo_stage4_file="gentoo-stage4-${target_flavour}-${target_arch}-${target_version}.tar.xz"
     gentoo_stage4_url="${gentoo_stage4_repo_url}/${target_version}/${gentoo_stage4_file}"
 }
@@ -1091,8 +1117,8 @@ gentoo_fetch_stage3() {
 
 # We also use this in a github-action
 build_gentoo_stage4() {
-    local flavour
-    flavour="$1"
+    local target_flavour
+    target_flavour="$1"
     local target_arch
     target_arch="$2"
 
@@ -1126,10 +1152,11 @@ build_gentoo_stage4() {
 
     podman buildx build --cap-add=SYS_PTRACE \
                         --platform="${platform}" \
-                        --build-arg TARGETARCH="$target_arch" \
+                        --build-arg TARGET_ARCH="$target_arch" \
+                        --build-arg TARGET_FLAVOUR="$target_flavour" \
                         -v "${PWD}"/output:/output \
                         -t gentoo-stage4-"$flavour-$target_arch" \
-                        -f Containerfile-"$flavour"
+                        -f Containerfile
 }
 
 openwrt_build() {
@@ -1429,21 +1456,34 @@ part_types() {
 }
 
 alpine_create_disk() {
+    local create_mode
+    create_mode="${1}"
     local path
-    path="${1}"
+    path="${2}"
     local file
-    file="${2}"
+    file="${3}"
     local img_url
-    img_url="${3}"
+    img_url="${4}"
     local csum_url
-    csum_url="${4}"
+    csum_url="${5}"
     local csum_file
-    csum_file="${5}"
+    csum_file="${6}"
     local user
-    user="${6}"
+    user="${7}"
     local compressed_file
     compressed_file="${file}.xz"
 
+    case "$create_mode" in
+    fetch)
+        alpine_fetch_image "$@"
+        ;;
+    build)
+        alpine_build "sway" ""
+        ;;
+    esac
+}
+
+alpine_fetch_image() {
     cd "${path}" || exit 1
     info "Alpine: Fetching pre-built image"
     download_miss "${path}" \
@@ -1465,7 +1505,6 @@ alpine_create_disk() {
         fi
     fi
 }
-
 gentoo_create_disk() {
     local path
     path="${1}"
@@ -1490,6 +1529,8 @@ gentoo_create_disk() {
     create_disk "${disk_file}"
 
     case "$os" in
+    ubuntu)
+        ;&
     fedora)
         loop_mount_linux "${disk_file}"
         ;;
@@ -1500,7 +1541,10 @@ gentoo_create_disk() {
 
     # Create filesystems
     case "$os" in
+    ubuntu)
+        ;&
     fedora)
+        info "Creating file systems"
         if ! mkfs.vfat "${esp_dev}"; then
             error "$(printf "Error: Failed to create filesystem\n")"
             exit 1
@@ -1845,8 +1889,8 @@ main() {
         fi
 
         case "$build_target" in
-        alpine)
-            build_alpine "desktop-sway" ""
+        alpine-sway)
+            alpine_build "sway" ""
             exit 0
             ;;
         freebsd)
@@ -1948,8 +1992,7 @@ main() {
 
         case "$build_target" in
         alma)
-            # We need root privileges
-            check_root
+            reexec_privileged "$@"
 
             target_img_file="alma.img"
             download "${alma_csum_url}" "${img_path}"
@@ -1985,9 +2028,10 @@ main() {
             ;&
         alpine-containeros)
             # We need root privileges
-            check_root
+            reexec_privileged "$@"
 
-            alpine_create_disk "${img_path}" \
+            alpine_create_disk "build" \
+                               "${img_path}" \
                                "${img_file}" \
                                "${alpine_img_url}" \
                                "${alpine_csum_url}" \
@@ -1997,25 +2041,25 @@ main() {
             info "$(printf "Alpine: Provisioning image\n")"
 
             # We need to apply changes to both partitions: A/B
-            provision_image "${path}/${file}" \
-                            "${mnt_path}" \
-                            "${user}" \
-                            2 \
-                            "${net_dev}" \
-                            "${net_address}" \
-                            "${net_gateway}" \
-                            "${ansible_user}" \
-                            "${ansible_roles}"
+            #provision_image "${path}/${file}" \
+            #                "${mnt_path}" \
+            #                "${user}" \
+            #                2 \
+            #                "${net_dev}" \
+            #                "${net_address}" \
+            #                "${net_gateway}" \
+            #                "${ansible_user}" \
+            #                "${ansible_roles}"
 
-            provision_image "${path}/${file}" \
-                            "${mnt_path}" \
-                            "${user}" \
-                            3 \
-                            "${net_dev}" \
-                            "${net_address}" \
-                            "${net_gateway}" \
-                            "${ansible_user}" \
-                            "${ansible_roles}"
+            #provision_image "${path}/${file}" \
+            #                "${mnt_path}" \
+            #                "${user}" \
+            #                3 \
+            #                "${net_dev}" \
+            #                "${net_address}" \
+            #                "${net_gateway}" \
+            #                "${ansible_user}" \
+            #                "${ansible_roles}"
             exit 0
             ;;
         gentoo-containeros)
@@ -2096,7 +2140,7 @@ main() {
         fi
 
         # We need root privileges
-        check_root
+        check_root_fail
 
         if [ ! -e "${img}" ]; then
             error "$(printf "Can not find disk image: %s" "${img}")"
@@ -2146,7 +2190,7 @@ main() {
     # Write disk image to device
     if [ "write" == "${1}" ]; then
         # We need root privileges
-        check_root
+        check_root_fail
 
         local img
         local img="${2}"
@@ -2217,7 +2261,7 @@ main() {
     # Provision disk image
     if [ "provision" == "${1}" ]; then
         # We need root privileges
-        check_root
+        check_root_fail
 
         info "$(printf "Gentoo: Provisioning image\n")"
 
@@ -2268,4 +2312,5 @@ main() {
     exit 1
 }
 
+args="$@"
 main "$@"
