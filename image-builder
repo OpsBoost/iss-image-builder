@@ -952,7 +952,7 @@ build_freebsd_release() {
     cp /etc/src.conf "$target_path/etc"
 
     cd "${src_path}"
-    sh -c "release/release.sh -c $target_path/etc"
+    sh -c "TARGETS="amd64" release/release.sh -c $target_path/etc/release.conf mini-memstick"
 
     info "$(printf "Creating compressed archive: %s\n" "${release_archive}")"
     tar cJf "${release_archive}" "${target_path}"
